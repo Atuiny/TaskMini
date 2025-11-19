@@ -33,6 +33,14 @@ GMutex cache_mutex;
 FilterCriteria current_filter = {0};
 GtkWidget *filter_entries[7] = {0}; // PID, Name, CPU, GPU, Memory, Network, Type
 
+// Dynamic column headers
+GtkTreeViewColumn *cpu_column = NULL;
+GtkTreeViewColumn *gpu_column = NULL; 
+GtkTreeViewColumn *memory_column = NULL;
+float current_cpu_usage = 0.0;
+float current_gpu_usage = 0.0;
+float current_memory_usage = 0.0;
+
 // Security tracking
 time_t last_update_time = 0;
 int consecutive_failures = 0;
@@ -96,6 +104,7 @@ gboolean parse_network_filter(const char *filter, long long *bps, char *op);
 long long network_to_bps(const char *net_str);
 gboolean validate_filter_input(const char *text, int filter_type);
 void apply_filters_to_display(void);
+void update_column_headers(float cpu_percent, float gpu_percent, float memory_percent);
 
 // Incremental UI update function that preserves scroll position by only updating changed rows
 gboolean update_ui_func(gpointer user_data) {
@@ -250,12 +259,21 @@ gboolean update_ui_func(gpointer user_data) {
     g_hash_table_destroy(new_pids);
     g_mutex_unlock(&cache_mutex);
     
-    // Update specs label with dynamic GPU usage in friendly format
-    char full_specs[1024];
+    // Update current usage values
+    current_cpu_usage = data->system_cpu_usage;
+    current_gpu_usage = data->system_memory_usage; // We'll get GPU from data->gpu_usage
+    current_memory_usage = data->system_memory_usage;
     
-    // Parse GPU percentage for friendly display
+    // Parse GPU percentage from the gpu_usage string
     float gpu_percent = 0.0;
     sscanf(data->gpu_usage, "%f%%", &gpu_percent);
+    current_gpu_usage = gpu_percent;
+    
+    // Update column headers with current usage
+    update_column_headers(current_cpu_usage, current_gpu_usage, current_memory_usage);
+    
+    // Update specs label with dynamic GPU usage in friendly format
+    char full_specs[1024];
     
     char gpu_status[50];
     if (gpu_percent < 5.0) {
@@ -436,17 +454,17 @@ void activate(GtkApplication *app, gpointer user_data) {
     gtk_tree_view_column_set_sort_column_id(column, COL_NAME);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
 
-    column = gtk_tree_view_column_new_with_attributes("CPU (% of system)", renderer, "text", COL_CPU, NULL);
-    gtk_tree_view_column_set_sort_column_id(column, COL_CPU);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
+    cpu_column = gtk_tree_view_column_new_with_attributes("CPU", renderer, "text", COL_CPU, NULL);
+    gtk_tree_view_column_set_sort_column_id(cpu_column, COL_CPU);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), cpu_column);
 
-    column = gtk_tree_view_column_new_with_attributes("GPU (%)", renderer, "text", COL_GPU, NULL);
-    gtk_tree_view_column_set_sort_column_id(column, COL_GPU);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
+    gpu_column = gtk_tree_view_column_new_with_attributes("GPU", renderer, "text", COL_GPU, NULL);
+    gtk_tree_view_column_set_sort_column_id(gpu_column, COL_GPU);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), gpu_column);
 
-    column = gtk_tree_view_column_new_with_attributes("Memory", renderer, "text", COL_MEM, NULL);
-    gtk_tree_view_column_set_sort_column_id(column, COL_MEM);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
+    memory_column = gtk_tree_view_column_new_with_attributes("Memory", renderer, "text", COL_MEM, NULL);
+    gtk_tree_view_column_set_sort_column_id(memory_column, COL_MEM);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), memory_column);
 
     column = gtk_tree_view_column_new_with_attributes("Network", renderer, "text", COL_NET, NULL);
     gtk_tree_view_column_set_sort_column_id(column, COL_NET);
@@ -1098,4 +1116,25 @@ void apply_filters_to_display(void) {
     }
     
     g_mutex_unlock(&cache_mutex);
+}
+
+// Function to update column headers with current usage percentages
+void update_column_headers(float cpu_percent, float gpu_percent, float memory_percent) {
+    if (cpu_column) {
+        char cpu_title[100];
+        snprintf(cpu_title, sizeof(cpu_title), "CPU (%.1f%% system)", cpu_percent);
+        gtk_tree_view_column_set_title(cpu_column, cpu_title);
+    }
+    
+    if (gpu_column) {
+        char gpu_title[100];
+        snprintf(gpu_title, sizeof(gpu_title), "GPU (%.1f%% system)", gpu_percent);
+        gtk_tree_view_column_set_title(gpu_column, gpu_title);
+    }
+    
+    if (memory_column) {
+        char memory_title[100];
+        snprintf(memory_title, sizeof(memory_title), "Memory (%.1f%% system)", memory_percent);
+        gtk_tree_view_column_set_title(memory_column, memory_title);
+    }
 }

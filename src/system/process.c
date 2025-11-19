@@ -460,6 +460,8 @@ gpointer update_thread_func(gpointer data) {
     update_data->processes = processes;
     update_data->gpu_usage = gpu_usage ? gpu_usage : strdup("N/A");
     update_data->system_summary = strdup(summary_buffer);
+    update_data->system_cpu_usage = get_system_cpu_usage();
+    update_data->system_memory_usage = get_system_memory_usage();
 
     g_idle_add(update_ui_func, update_data);
     

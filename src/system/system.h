@@ -18,6 +18,10 @@ char* get_run_time(const char *pid);
 char* get_gpu_usage(void);
 char* get_gpu_usage_fallback(void);
 
+// System-wide usage functions
+float get_system_cpu_usage(void);
+float get_system_memory_usage(void);
+
 // Network monitoring functions
 long long get_net_bytes(const char *pid);
 void collect_all_network_data(void);

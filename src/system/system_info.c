@@ -222,3 +222,59 @@ void determine_process_type(Process *proc) {
         proc->is_system = FALSE;
     }
 }
+
+// Get system-wide CPU usage percentage
+float get_system_cpu_usage(void) {
+    char *output = run_command("top -l 1 -n 0 | grep 'CPU usage:' | awk '{print $3}' | sed 's/%//'");
+    if (!output) return 0.0;
+    
+    // Parse the CPU usage percentage
+    float cpu_usage = 0.0;
+    if (strlen(output) > 0) {
+        cpu_usage = atof(output);
+    }
+    
+    free(output);
+    return cpu_usage;
+}
+
+// Get system-wide memory usage percentage  
+float get_system_memory_usage(void) {
+    char *vm_stat_output = run_command("vm_stat");
+    if (!vm_stat_output) return 0.0;
+    
+    // Parse vm_stat output to get memory statistics
+    long pages_free = 0, pages_active = 0, pages_inactive = 0, pages_speculative = 0;
+    long pages_wired = 0, pages_compressed = 0;
+    
+    char *line = strtok(vm_stat_output, "\n");
+    while (line) {
+        if (strstr(line, "Pages free:")) {
+            pages_free = atol(strstr(line, ":") + 1);
+        } else if (strstr(line, "Pages active:")) {
+            pages_active = atol(strstr(line, ":") + 1);
+        } else if (strstr(line, "Pages inactive:")) {
+            pages_inactive = atol(strstr(line, ":") + 1);
+        } else if (strstr(line, "Pages speculative:")) {
+            pages_speculative = atol(strstr(line, ":") + 1);
+        } else if (strstr(line, "Pages wired down:")) {
+            pages_wired = atol(strstr(line, ":") + 1);
+        } else if (strstr(line, "Pages occupied by compressor:")) {
+            pages_compressed = atol(strstr(line, ":") + 1);
+        }
+        line = strtok(NULL, "\n");
+    }
+    
+    free(vm_stat_output);
+    
+    // Calculate memory usage percentage
+    // Used = Active + Inactive + Wired + Compressed
+    // Total = Used + Free + Speculative
+    long pages_used = pages_active + pages_inactive + pages_wired + pages_compressed;
+    long pages_total = pages_used + pages_free + pages_speculative;
+    
+    if (pages_total == 0) return 0.0;
+    
+    float memory_usage = (float)pages_used / (float)pages_total * 100.0;
+    return memory_usage;
+}

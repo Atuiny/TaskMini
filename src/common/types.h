@@ -35,6 +35,8 @@ typedef struct {
     GList *processes;       // List of Process structs
     char *gpu_usage;        // GPU usage string
     char *system_summary;   // System summary info
+    float system_cpu_usage; // System-wide CPU usage percentage
+    float system_memory_usage; // System-wide memory usage percentage
 } UpdateData;
 
 // Process cache entry for incremental updates
