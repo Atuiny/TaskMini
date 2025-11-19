@@ -37,6 +37,13 @@ typedef struct {
     char *system_summary;   // System summary info
 } UpdateData;
 
+// Process cache entry for incremental updates
+typedef struct {
+    Process *process;           // Process data
+    GtkTreeRowReference *row_ref;  // Stable reference to TreeView row
+    gboolean valid;             // Whether the row reference is valid
+} ProcessCacheEntry;
+
 // Scroll position is now preserved using GTK model detachment technique
 
 #endif // TYPES_H

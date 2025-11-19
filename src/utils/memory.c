@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "../ui/ui.h"
 #include "../common/config.h"
 #include <time.h>
 
@@ -108,6 +109,9 @@ void return_cached_buffer(char *buffer, size_t size) {
 
 void cleanup_resources(void) {
     cleanup_process_pool();
+    
+    // Clean up UI resources
+    cleanup_ui_resources();
     
     // Clean up string cache
     if (cache_initialized) {

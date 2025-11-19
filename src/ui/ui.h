@@ -44,4 +44,7 @@ extern int consecutive_failures;
 extern gboolean update_thread_running;
 extern time_t update_start_time;
 
+// Cleanup function
+void cleanup_ui_resources(void);
+
 #endif // UI_H

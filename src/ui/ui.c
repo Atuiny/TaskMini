@@ -22,59 +22,36 @@ GtkAdjustment *vertical_adjustment = NULL;
 GHashTable *prev_net_bytes = NULL;
 GHashTable *prev_times = NULL;
 
+// Process cache for incremental updates (key: PID, value: ProcessCacheEntry*)
+GHashTable *process_cache = NULL;
+GMutex cache_mutex;
+
 // Security tracking
 time_t last_update_time = 0;
 int consecutive_failures = 0;
 
-// Function to restore scroll position with proper timing
-gboolean restore_scroll_position(gpointer user_data) {
-    gdouble *scroll_position = (gdouble *)user_data;
+// Helper function to compare two processes for changes
+gboolean process_data_changed(Process *old_proc, Process *new_proc) {
+    if (!old_proc || !new_proc) return TRUE;
     
-    if (vertical_adjustment && *scroll_position > 0.0) {
-        // Clamp the value to valid range
-        gdouble upper = gtk_adjustment_get_upper(vertical_adjustment);
-        gdouble page_size = gtk_adjustment_get_page_size(vertical_adjustment);
-        gdouble max_value = upper - page_size;
-        
-        if (*scroll_position > max_value) {
-            *scroll_position = max_value;
-        }
-        
-        gtk_adjustment_set_value(vertical_adjustment, *scroll_position);
-    }
-    
-    return G_SOURCE_REMOVE; // Remove this source
+    return strcmp(old_proc->name, new_proc->name) != 0 ||
+           strcmp(old_proc->cpu, new_proc->cpu) != 0 ||
+           strcmp(old_proc->mem, new_proc->mem) != 0 ||
+           strcmp(old_proc->gpu, new_proc->gpu) != 0 ||
+           strcmp(old_proc->net, new_proc->net) != 0 ||
+           strcmp(old_proc->runtime, new_proc->runtime) != 0 ||
+           strcmp(old_proc->type, new_proc->type) != 0;
 }
 
-// Function called in main thread via g_idle_add. Updates the liststore with 
-// robust scroll position preservation using both model detachment and explicit scroll restoration.
-gboolean update_ui_func(gpointer user_data) {
-    UpdateData *data = (UpdateData *)user_data;
-
-    // Save current scroll position before any updates
-    gdouble scroll_position = 0.0;
-    if (vertical_adjustment) {
-        scroll_position = gtk_adjustment_get_value(vertical_adjustment);
-    }
-
-    // Temporarily detach model from TreeView to prevent scroll jumping
-    GtkTreeModel *model = NULL;
-    if (global_treeview) {
-        model = gtk_tree_view_get_model(global_treeview);
-        if (model) {
-            g_object_ref(model);  // Keep reference while detached
-            gtk_tree_view_set_model(global_treeview, NULL);  // Detach
-        }
-    }
-
-    // Update the list store while TreeView is detached
-    gtk_list_store_clear(liststore);
-
+// Helper function to update a single row in the TreeView using row reference
+void update_tree_row_by_ref(GtkTreeRowReference *row_ref, Process *proc) {
+    if (!row_ref || !gtk_tree_row_reference_valid(row_ref)) return;
+    
+    GtkTreePath *path = gtk_tree_row_reference_get_path(row_ref);
+    if (!path) return;
+    
     GtkTreeIter iter;
-    GList *l;
-    for (l = data->processes; l != NULL; l = l->next) {
-        Process *proc = (Process *)l->data;
-        gtk_list_store_append(liststore, &iter);
+    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &iter, path)) {
         gtk_list_store_set(liststore, &iter,
                            COL_PID, proc->pid,
                            COL_NAME, proc->name,
@@ -85,27 +62,131 @@ gboolean update_ui_func(gpointer user_data) {
                            COL_RUNTIME, proc->runtime,
                            COL_TYPE, proc->type,
                            -1);
-        free_process(proc);
+    }
+    
+    gtk_tree_path_free(path);
+}
+
+// Helper function to free ProcessCacheEntry
+void free_cache_entry(ProcessCacheEntry *entry) {
+    if (entry) {
+        if (entry->process) {
+            free_process(entry->process);
+        }
+        if (entry->row_ref) {
+            gtk_tree_row_reference_free(entry->row_ref);
+        }
+        g_free(entry);
+    }
+}
+
+// Forward declaration
+void cleanup_stale_cache_entries(void);
+
+// Incremental UI update function that preserves scroll position by only updating changed rows
+gboolean update_ui_func(gpointer user_data) {
+    UpdateData *data = (UpdateData *)user_data;
+    
+    // Periodic cache maintenance
+    cleanup_stale_cache_entries();
+    
+    g_mutex_lock(&cache_mutex);
+    
+    // Create a set of PIDs from new data to track which processes are still alive
+    GHashTable *new_pids = g_hash_table_new(g_str_hash, g_str_equal);
+    
+    // Phase 1: Update existing processes and add new ones
+    GList *l;
+    for (l = data->processes; l != NULL; l = l->next) {
+        Process *new_proc = (Process *)l->data;
+        g_hash_table_add(new_pids, new_proc->pid);
+        
+        ProcessCacheEntry *cache_entry = g_hash_table_lookup(process_cache, new_proc->pid);
+        
+        if (cache_entry && cache_entry->valid && 
+            cache_entry->row_ref && gtk_tree_row_reference_valid(cache_entry->row_ref)) {
+            // Process exists - check if data changed
+            if (process_data_changed(cache_entry->process, new_proc)) {
+                // Update the existing row
+                update_tree_row_by_ref(cache_entry->row_ref, new_proc);
+                
+                // Update cached process data
+                free_process(cache_entry->process);
+                cache_entry->process = malloc(sizeof(Process));
+                memcpy(cache_entry->process, new_proc, sizeof(Process));
+            }
+        } else {
+            // New process - add to TreeView and cache
+            GtkTreeIter iter;
+            gtk_list_store_append(liststore, &iter);
+            gtk_list_store_set(liststore, &iter,
+                               COL_PID, new_proc->pid,
+                               COL_NAME, new_proc->name,
+                               COL_CPU, new_proc->cpu,
+                               COL_GPU, new_proc->gpu,
+                               COL_MEM, new_proc->mem,
+                               COL_NET, new_proc->net,
+                               COL_RUNTIME, new_proc->runtime,
+                               COL_TYPE, new_proc->type,
+                               -1);
+            
+            // Create row reference for stable access
+            GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(liststore), &iter);
+            GtkTreeRowReference *row_ref = gtk_tree_row_reference_new(GTK_TREE_MODEL(liststore), path);
+            gtk_tree_path_free(path);
+            
+            // Add to cache
+            ProcessCacheEntry *new_entry = g_malloc(sizeof(ProcessCacheEntry));
+            new_entry->process = malloc(sizeof(Process));
+            memcpy(new_entry->process, new_proc, sizeof(Process));
+            new_entry->row_ref = row_ref;
+            new_entry->valid = TRUE;
+            
+            g_hash_table_insert(process_cache, g_strdup(new_proc->pid), new_entry);
+        }
+        
+        free_process(new_proc);
     }
     g_list_free(data->processes);
-
-    // Reattach the model
-    if (global_treeview && model) {
-        gtk_tree_view_set_model(global_treeview, model);
-        g_object_unref(model);
+    
+    // Phase 2: Remove processes that are no longer running
+    GHashTableIter iter;
+    gpointer key, value;
+    GList *to_remove = NULL;
+    
+    g_hash_table_iter_init(&iter, process_cache);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        char *pid = (char *)key;
+        ProcessCacheEntry *entry = (ProcessCacheEntry *)value;
+        
+        if (!g_hash_table_contains(new_pids, pid)) {
+            // Process no longer exists - mark for removal
+            to_remove = g_list_prepend(to_remove, g_strdup(pid));
+            
+            // Remove from TreeView using row reference
+            if (entry->valid && entry->row_ref && gtk_tree_row_reference_valid(entry->row_ref)) {
+                GtkTreePath *path = gtk_tree_row_reference_get_path(entry->row_ref);
+                if (path) {
+                    GtkTreeIter iter;
+                    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &iter, path)) {
+                        gtk_list_store_remove(liststore, &iter);
+                    }
+                    gtk_tree_path_free(path);
+                }
+            }
+        }
     }
-
-    // Explicitly restore scroll position after a short delay to ensure model is fully updated
-    if (vertical_adjustment && scroll_position > 0.0) {
-        // Use g_idle_add_full with low priority to ensure this runs after all other updates
-        gdouble *pos_copy = g_malloc(sizeof(gdouble));
-        *pos_copy = scroll_position;
-        g_idle_add_full(G_PRIORITY_LOW, (GSourceFunc)restore_scroll_position, pos_copy, g_free);
+    
+    // Remove from cache
+    for (GList *rem = to_remove; rem != NULL; rem = rem->next) {
+        g_hash_table_remove(process_cache, (char *)rem->data);
+        g_free(rem->data);
     }
-
-    // Don't force re-sort - let user's column sort choice persist
-    // The TreeView will maintain the current sort order automatically
-
+    g_list_free(to_remove);
+    
+    g_hash_table_destroy(new_pids);
+    g_mutex_unlock(&cache_mutex);
+    
     // Update specs label with dynamic GPU usage in friendly format
     char full_specs[1024];
     
@@ -266,6 +347,10 @@ void activate(GtkApplication *app, gpointer user_data) {
     prev_net_bytes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     prev_times = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     g_mutex_init(&hash_mutex);
+    
+    // Init process cache for incremental updates
+    process_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)free_cache_entry);
+    g_mutex_init(&cache_mutex);
 
     // Get static specs
     static_specs = get_static_specs();
@@ -278,4 +363,65 @@ void activate(GtkApplication *app, gpointer user_data) {
     g_timeout_add(UI_UPDATE_INTERVAL_MS, timeout_callback, NULL);
 
     gtk_widget_show_all(window);
+}
+
+// Cache maintenance function to clean up stale entries
+void cleanup_stale_cache_entries(void) {
+    static time_t last_cleanup = 0;
+    time_t now = time(NULL);
+    
+    // Only cleanup every 30 seconds to avoid overhead
+    if (now - last_cleanup < 30) return;
+    last_cleanup = now;
+    
+    g_mutex_lock(&cache_mutex);
+    
+    GHashTableIter iter;
+    gpointer key, value;
+    GList *to_remove = NULL;
+    
+    g_hash_table_iter_init(&iter, process_cache);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        ProcessCacheEntry *entry = (ProcessCacheEntry *)value;
+        
+        // Check if row reference is still valid
+        if (!entry->row_ref || !gtk_tree_row_reference_valid(entry->row_ref)) {
+            to_remove = g_list_prepend(to_remove, g_strdup((char *)key));
+        }
+    }
+    
+    // Remove stale entries
+    for (GList *rem = to_remove; rem != NULL; rem = rem->next) {
+        g_hash_table_remove(process_cache, (char *)rem->data);
+        g_free(rem->data);
+    }
+    g_list_free(to_remove);
+    
+    g_mutex_unlock(&cache_mutex);
+}
+
+// Cleanup function for UI resources
+void cleanup_ui_resources(void) {
+    if (process_cache) {
+        g_hash_table_destroy(process_cache);
+        process_cache = NULL;
+    }
+    
+    if (prev_net_bytes) {
+        g_hash_table_destroy(prev_net_bytes);
+        prev_net_bytes = NULL;
+    }
+    
+    if (prev_times) {
+        g_hash_table_destroy(prev_times);
+        prev_times = NULL;
+    }
+    
+    g_mutex_clear(&cache_mutex);
+    g_mutex_clear(&hash_mutex);
+    
+    if (static_specs) {
+        free(static_specs);
+        static_specs = NULL;
+    }
 }
