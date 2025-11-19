@@ -1,8 +1,11 @@
 #include "system.h"
+#include "performance.h"
 #include "../utils/utils.h"
 #include "../common/config.h"
 #include <unistd.h>
 #include <ctype.h>
+#include <sys/sysctl.h>
+#include <mach/mach.h>
 
 // Global variable for CPU core count
 int cpu_cores = 0;
@@ -223,58 +226,88 @@ void determine_process_type(Process *proc) {
     }
 }
 
-// Get system-wide CPU usage percentage
+// Get system-wide CPU usage percentage (optimized)
 float get_system_cpu_usage(void) {
-    char *output = run_command("top -l 1 -n 0 | grep 'CPU usage:' | awk '{print $3}' | sed 's/%//'");
-    if (!output) return 0.0;
-    
-    // Parse the CPU usage percentage
-    float cpu_usage = 0.0;
-    if (strlen(output) > 0) {
-        cpu_usage = atof(output);
+    // Use optimized version first
+    double cpu_fast = get_system_cpu_usage_fast();
+    if (cpu_fast > 0.0) {
+        return (float)cpu_fast;
     }
     
-    free(output);
-    return cpu_usage;
+    // Fallback to traditional method if needed
+    FILE *fp = popen("top -l 1 -n 0 | grep 'CPU usage:'", "r");
+    if (!fp) return 0.0;
+    
+    char line[256];
+    if (!fgets(line, sizeof(line), fp)) {
+        pclose(fp);
+        return 0.0;
+    }
+    pclose(fp);
+    
+    // Parse: "CPU usage: 37.57% user, 26.53% sys, 35.88% idle"
+    float user = 0.0, sys = 0.0, idle = 0.0;
+    if (sscanf(line, "CPU usage: %f%% user, %f%% sys, %f%% idle", &user, &sys, &idle) == 3) {
+        // CPU usage = user + sys (exclude idle)
+        return user + sys;
+    }
+    
+    return 0.0;
 }
 
-// Get system-wide memory usage percentage  
+// Get system-wide memory usage percentage (optimized)
 float get_system_memory_usage(void) {
-    char *vm_stat_output = run_command("vm_stat");
-    if (!vm_stat_output) return 0.0;
-    
-    // Parse vm_stat output to get memory statistics
-    long pages_free = 0, pages_active = 0, pages_inactive = 0, pages_speculative = 0;
-    long pages_wired = 0, pages_compressed = 0;
-    
-    char *line = strtok(vm_stat_output, "\n");
-    while (line) {
-        if (strstr(line, "Pages free:")) {
-            pages_free = atol(strstr(line, ":") + 1);
-        } else if (strstr(line, "Pages active:")) {
-            pages_active = atol(strstr(line, ":") + 1);
-        } else if (strstr(line, "Pages inactive:")) {
-            pages_inactive = atol(strstr(line, ":") + 1);
-        } else if (strstr(line, "Pages speculative:")) {
-            pages_speculative = atol(strstr(line, ":") + 1);
-        } else if (strstr(line, "Pages wired down:")) {
-            pages_wired = atol(strstr(line, ":") + 1);
-        } else if (strstr(line, "Pages occupied by compressor:")) {
-            pages_compressed = atol(strstr(line, ":") + 1);
-        }
-        line = strtok(NULL, "\n");
+    // Use optimized version first
+    double mem_fast = get_system_memory_usage_fast();
+    if (mem_fast > 0.0) {
+        return (float)mem_fast;
     }
     
-    free(vm_stat_output);
+    // Fallback to traditional method if needed
+    char *total_mem_str = run_command("sysctl -n hw.memsize");
+    if (!total_mem_str || strcmp(total_mem_str, "N/A") == 0) {
+        if (total_mem_str) free(total_mem_str);
+        return 0.0;
+    }
     
-    // Calculate memory usage percentage
-    // Used = Active + Inactive + Wired + Compressed
-    // Total = Used + Free + Speculative
-    long pages_used = pages_active + pages_inactive + pages_wired + pages_compressed;
-    long pages_total = pages_used + pages_free + pages_speculative;
+    long long total_bytes = atoll(total_mem_str);
+    free(total_mem_str);
     
-    if (pages_total == 0) return 0.0;
+    if (total_bytes == 0) return 0.0;
     
-    float memory_usage = (float)pages_used / (float)pages_total * 100.0;
-    return memory_usage;
+    // Get used pages using Activity Monitor's method: sum of active, inactive, speculative, wired, and compressed
+    FILE *fp = popen("vm_stat | awk 'BEGIN{total=0} /Pages active|Pages inactive|Pages speculative|Pages wired down|Pages occupied by compressor/ {gsub(/[^0-9]/, \"\", $NF); total+=$NF} END{print total}'", "r");
+    if (!fp) return 0.0;
+    
+    char buffer[64];
+    if (!fgets(buffer, sizeof(buffer), fp)) {
+        pclose(fp);
+        return 0.0;
+    }
+    pclose(fp);
+    
+    // Remove newline
+    char *newline = strchr(buffer, '\n');
+    if (newline) *newline = '\0';
+    
+    long used_pages = atol(buffer);
+    
+    // Get actual page size from vm_stat header
+    FILE *fp2 = popen("vm_stat | head -1 | grep -o '[0-9]*' | tail -1", "r");
+    if (!fp2) return 0.0;
+    
+    char page_size_str[32];
+    if (!fgets(page_size_str, sizeof(page_size_str), fp2)) {
+        pclose(fp2);
+        return 0.0;
+    }
+    pclose(fp2);
+    
+    long page_size = atol(page_size_str);
+    if (page_size == 0) page_size = 16384; // fallback
+    
+    long long used_bytes = used_pages * page_size;
+    
+    return ((float)used_bytes / (float)total_bytes) * 100.0;
 }
+

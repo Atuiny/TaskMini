@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "memory_pool.h"
 #include "../ui/ui.h"
 #include "../common/config.h"
 #include <time.h>
@@ -30,31 +31,23 @@ void init_process_pool(void) {
 }
 
 Process* alloc_process(void) {
-    if (!pool_initialized) init_process_pool();
-    
-    for (int i = 0; i < PROCESS_POOL_SIZE; i++) {
-        if (!pool_used[i]) {
-            pool_used[i] = TRUE;
-            memset(&process_pool[i], 0, sizeof(Process));
-            return &process_pool[i];
-        }
-    }
-    
-    // Fallback to malloc if pool exhausted (rare case)
-    return malloc(sizeof(Process));
+    // Use the optimized memory pool
+    return get_process_from_pool_fast();
+}
+
+// Compatibility wrapper for existing code
+Process* get_process_from_pool(void) {
+    return get_process_from_pool_fast();
+}
+
+// Compatibility wrapper for returning processes
+void return_process_to_pool(Process *proc) {
+    return_process_to_pool_fast(proc);
 }
 
 void free_process(Process *proc) {
-    if (!proc) return;
-    
-    // Check if it's from our pool
-    if (proc >= process_pool && proc < process_pool + PROCESS_POOL_SIZE) {
-        int index = proc - process_pool;
-        pool_used[index] = FALSE;
-    } else {
-        // It was a malloc'd fallback
-        free(proc);
-    }
+    // Use the optimized pool return function
+    return_process_to_pool_fast(proc);
 }
 
 void cleanup_process_pool(void) {

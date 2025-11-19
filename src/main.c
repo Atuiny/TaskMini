@@ -4,14 +4,17 @@
 
 #include "ui/ui.h"
 #include "system/system.h"
+#include "system/performance.h"
 #include "utils/utils.h"
+#include "utils/memory_pool.h"
 
 #ifndef TESTING
 int main(int argc, char **argv) {
     // Register cleanup handler
     atexit(cleanup_resources);
     
-    // Initialize memory pools early
+    // Initialize optimized memory pools early
+    init_memory_pools();
     init_process_pool();
     
     app = gtk_application_new("com.example.TaskMini", G_APPLICATION_DEFAULT_FLAGS);

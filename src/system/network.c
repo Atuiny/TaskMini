@@ -8,8 +8,8 @@
 time_t last_net_collection = 0;
 GHashTable *net_cache = NULL;
 
-// Individual network lookup (for specific PID when needed)
-static long long get_net_bytes_individual(const char *pid) {
+// Individual network lookup (for specific PID when needed) - Currently unused
+__attribute__((unused)) static long long get_net_bytes_individual(const char *pid) {
     char cmd[100];
     snprintf(cmd, sizeof(cmd), "nettop -p %s -L1", pid);
     FILE *fp = popen(cmd, "r");

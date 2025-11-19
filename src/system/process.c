@@ -1,4 +1,5 @@
 #include "system.h" 
+#include "performance.h"
 #include "../ui/ui.h"
 #include "../utils/utils.h"
 #include "../common/config.h"
@@ -16,6 +17,7 @@ extern double prev_system_time;
 
 // New function for the background thread. SECURED with timeout and resource limits.
 gpointer update_thread_func(gpointer data) {
+    (void)data; // Suppress unused parameter warning
     update_thread_running = TRUE;
     update_start_time = time(NULL);
     
@@ -279,6 +281,7 @@ gpointer update_thread_func(gpointer data) {
         }
         
         // Look for the PID COMMAND header to know when process lines start
+        // We want the SECOND header (from the second sample) for better accuracy
         if (strstr(line, "PID") && strstr(line, "COMMAND")) {
             found_header = TRUE;
             continue;
@@ -460,6 +463,8 @@ gpointer update_thread_func(gpointer data) {
     update_data->processes = processes;
     update_data->gpu_usage = gpu_usage ? gpu_usage : strdup("N/A");
     update_data->system_summary = strdup(summary_buffer);
+    
+    // Use optimized system usage collection (with fallback)
     update_data->system_cpu_usage = get_system_cpu_usage();
     update_data->system_memory_usage = get_system_memory_usage();
 

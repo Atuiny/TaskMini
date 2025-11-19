@@ -3,6 +3,7 @@
 
 // Context menu for process management
 void show_context_menu(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
+    (void)widget; // Suppress unused parameter warning
     GtkTreeView *treeview = GTK_TREE_VIEW(user_data);
     GtkTreeSelection *selection = gtk_tree_view_get_selection(treeview);
     GtkTreeModel *model;
@@ -53,6 +54,7 @@ void show_context_menu(GtkWidget *widget, GdkEventButton *event, gpointer user_d
 
 // Right-click event handler
 gboolean on_treeview_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
+    (void)user_data; // Suppress unused parameter warning
     if (event->type == GDK_BUTTON_PRESS && event->button == 3) { // Right click
         GtkTreeView *treeview = GTK_TREE_VIEW(widget);
         GtkTreePath *path;
@@ -71,6 +73,7 @@ gboolean on_treeview_button_press(GtkWidget *widget, GdkEventButton *event, gpoi
 
 // Kill process callback
 void kill_process_callback(GtkWidget *menuitem, gpointer user_data) {
+    (void)user_data; // Suppress unused parameter warning
     const char *pid = (const char*)g_object_get_data(G_OBJECT(menuitem), "pid");
     const char *name = (const char*)g_object_get_data(G_OBJECT(menuitem), "name");
     

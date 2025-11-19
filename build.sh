@@ -24,9 +24,9 @@ fi
 
 echo "Dependencies OK!"
 
-# Build TaskMini
+# Build TaskMini using Makefile
 echo "Building TaskMini..."
-gcc `pkg-config --cflags gtk+-3.0` -o TaskMini TaskMini.c `pkg-config --libs gtk+-3.0` -lpthread
+make
 
 if [ $? -eq 0 ]; then
     echo ""

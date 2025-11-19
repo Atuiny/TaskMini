@@ -10,7 +10,7 @@ gboolean is_safe_command(const char *cmd) {
     const char *safe_commands[] = {
         "top", "ps", "sysctl", "nettop", "powermetrics", 
         "system_profiler", "sw_vers", "df", "awk", "grep", 
-        "head", "tail", "sed", "kill", NULL
+        "head", "tail", "sed", "kill", "vm_stat", NULL
     };
     
     // Check if command starts with a safe prefix
@@ -28,7 +28,9 @@ gboolean is_safe_command(const char *cmd) {
     if (strncmp(cmd, "system_profiler", 15) == 0 || 
         strncmp(cmd, "nettop", 6) == 0 ||
         strncmp(cmd, "ps", 2) == 0 ||
-        strncmp(cmd, "df", 2) == 0) {
+        strncmp(cmd, "df", 2) == 0 ||
+        strncmp(cmd, "top", 3) == 0 ||
+        strncmp(cmd, "vm_stat", 7) == 0) {
         
         // Still check for the most dangerous injection characters even for special commands
         const char *dangerous[] = {";", "&", "`", "$(", "${", "\\", NULL};

@@ -20,6 +20,7 @@ GMutex hash_mutex;
 GtkTreeView *global_treeview = NULL;
 GtkScrolledWindow *global_scrolled_window = NULL;
 GtkAdjustment *vertical_adjustment = NULL;
+static gdouble saved_scroll_position = 0.0;
 
 // Hash tables for network tracking
 GHashTable *prev_net_bytes = NULL;
@@ -110,85 +111,32 @@ void update_column_headers(float cpu_percent, float gpu_percent, float memory_pe
 gboolean update_ui_func(gpointer user_data) {
     UpdateData *data = (UpdateData *)user_data;
     
-    // Periodic cache maintenance
-    cleanup_stale_cache_entries();
+    // Simple approach - clear and add all processes
+    if (!liststore) {
+        return G_SOURCE_REMOVE;
+    }
     
-    g_mutex_lock(&cache_mutex);
+    // Preserve scroll position before clearing
+    if (vertical_adjustment) {
+        saved_scroll_position = gtk_adjustment_get_value(vertical_adjustment);
+    }
     
-    // Create a set of PIDs from new data to track which processes are still alive
-    GHashTable *new_pids = g_hash_table_new(g_str_hash, g_str_equal);
+    // Preserve current sort state before clearing
+    GtkTreeSortable *sortable = GTK_TREE_SORTABLE(liststore);
+    gint sort_column_id;
+    GtkSortType sort_order;
+    gboolean was_sorted = gtk_tree_sortable_get_sort_column_id(sortable, &sort_column_id, &sort_order);
     
-    // Phase 1: Update existing processes and add new ones
+    gtk_list_store_clear(liststore);
+    
+    // Add processes to the list (applying filters)
     GList *l;
     for (l = data->processes; l != NULL; l = l->next) {
         Process *new_proc = (Process *)l->data;
-        g_hash_table_add(new_pids, new_proc->pid);
         
-        ProcessCacheEntry *cache_entry = g_hash_table_lookup(process_cache, new_proc->pid);
-        
-        // Check if process matches current filter
-        gboolean matches_filter = process_matches_filter(new_proc);
-        
-        if (cache_entry && cache_entry->valid && 
-            cache_entry->row_ref && gtk_tree_row_reference_valid(cache_entry->row_ref)) {
-            // Process exists in cache
-            gboolean was_visible = process_matches_filter(cache_entry->process);
-            
-            if (matches_filter && was_visible) {
-                // Still visible - check if data changed
-                if (process_data_changed(cache_entry->process, new_proc)) {
-                    update_tree_row_by_ref(cache_entry->row_ref, new_proc);
-                    
-                    // Update cached process data
-                    free_process(cache_entry->process);
-                    cache_entry->process = malloc(sizeof(Process));
-                    memcpy(cache_entry->process, new_proc, sizeof(Process));
-                }
-            } else if (matches_filter && !was_visible) {
-                // Now matches filter - show it
-                GtkTreeIter iter;
-                gtk_list_store_append(liststore, &iter);
-                gtk_list_store_set(liststore, &iter,
-                                   COL_PID, new_proc->pid,
-                                   COL_NAME, new_proc->name,
-                                   COL_CPU, new_proc->cpu,
-                                   COL_GPU, new_proc->gpu,
-                                   COL_MEM, new_proc->mem,
-                                   COL_NET, new_proc->net,
-                                   COL_RUNTIME, new_proc->runtime,
-                                   COL_TYPE, new_proc->type,
-                                   -1);
-                
-                // Update row reference
-                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(liststore), &iter);
-                if (cache_entry->row_ref) {
-                    gtk_tree_row_reference_free(cache_entry->row_ref);
-                }
-                cache_entry->row_ref = gtk_tree_row_reference_new(GTK_TREE_MODEL(liststore), path);
-                gtk_tree_path_free(path);
-                
-                // Update cached process data
-                free_process(cache_entry->process);
-                cache_entry->process = malloc(sizeof(Process));
-                memcpy(cache_entry->process, new_proc, sizeof(Process));
-            } else if (!matches_filter && was_visible) {
-                // No longer matches filter - hide it
-                GtkTreePath *path = gtk_tree_row_reference_get_path(cache_entry->row_ref);
-                if (path) {
-                    GtkTreeIter iter;
-                    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &iter, path)) {
-                        gtk_list_store_remove(liststore, &iter);
-                    }
-                    gtk_tree_path_free(path);
-                }
-                
-                // Update cached process data but mark as hidden
-                free_process(cache_entry->process);
-                cache_entry->process = malloc(sizeof(Process));
-                memcpy(cache_entry->process, new_proc, sizeof(Process));
-            }
-        } else if (matches_filter) {
-            // New process - add to TreeView and cache
+        // Check if process matches current filter criteria
+        if (process_matches_filter(new_proc)) {
+            // Add to TreeView
             GtkTreeIter iter;
             gtk_list_store_append(liststore, &iter);
             gtk_list_store_set(liststore, &iter,
@@ -201,73 +149,29 @@ gboolean update_ui_func(gpointer user_data) {
                                COL_RUNTIME, new_proc->runtime,
                                COL_TYPE, new_proc->type,
                                -1);
-            
-            // Create row reference for stable access
-            GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(liststore), &iter);
-            GtkTreeRowReference *row_ref = gtk_tree_row_reference_new(GTK_TREE_MODEL(liststore), path);
-            gtk_tree_path_free(path);
-            
-            // Add to cache
-            ProcessCacheEntry *new_entry = g_malloc(sizeof(ProcessCacheEntry));
-            new_entry->process = malloc(sizeof(Process));
-            memcpy(new_entry->process, new_proc, sizeof(Process));
-            new_entry->row_ref = row_ref;
-            new_entry->valid = TRUE;
-            
-            g_hash_table_insert(process_cache, g_strdup(new_proc->pid), new_entry);
         }
         
         free_process(new_proc);
     }
     g_list_free(data->processes);
     
-    // Phase 2: Remove processes that are no longer running
-    GHashTableIter iter;
-    gpointer key, value;
-    GList *to_remove = NULL;
-    
-    g_hash_table_iter_init(&iter, process_cache);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        char *pid = (char *)key;
-        ProcessCacheEntry *entry = (ProcessCacheEntry *)value;
-        
-        if (!g_hash_table_contains(new_pids, pid)) {
-            // Process no longer exists - mark for removal
-            to_remove = g_list_prepend(to_remove, g_strdup(pid));
-            
-            // Remove from TreeView using row reference
-            if (entry->valid && entry->row_ref && gtk_tree_row_reference_valid(entry->row_ref)) {
-                GtkTreePath *path = gtk_tree_row_reference_get_path(entry->row_ref);
-                if (path) {
-                    GtkTreeIter iter;
-                    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &iter, path)) {
-                        gtk_list_store_remove(liststore, &iter);
-                    }
-                    gtk_tree_path_free(path);
-                }
-            }
-        }
+    // Restore sort state if it was previously sorted
+    if (was_sorted) {
+        gtk_tree_sortable_set_sort_column_id(sortable, sort_column_id, sort_order);
     }
     
-    // Remove from cache
-    for (GList *rem = to_remove; rem != NULL; rem = rem->next) {
-        g_hash_table_remove(process_cache, (char *)rem->data);
-        g_free(rem->data);
-    }
-    g_list_free(to_remove);
+    // Schedule scroll position restoration as an idle callback for more reliable timing
+    g_idle_add(restore_scroll_position, NULL);
     
-    g_hash_table_destroy(new_pids);
-    g_mutex_unlock(&cache_mutex);
-    
-    // Update current usage values
-    current_cpu_usage = data->system_cpu_usage;
-    current_gpu_usage = data->system_memory_usage; // We'll get GPU from data->gpu_usage
-    current_memory_usage = data->system_memory_usage;
+    // Update current usage values (if available)
+    if (data->system_cpu_usage > 0) current_cpu_usage = data->system_cpu_usage;
+    if (data->system_memory_usage > 0) current_memory_usage = data->system_memory_usage;
     
     // Parse GPU percentage from the gpu_usage string
     float gpu_percent = 0.0;
-    sscanf(data->gpu_usage, "%f%%", &gpu_percent);
-    current_gpu_usage = gpu_percent;
+    if (data->gpu_usage && sscanf(data->gpu_usage, "%f%%", &gpu_percent) == 1) {
+        current_gpu_usage = gpu_percent;
+    }
     
     // Update column headers with current usage
     update_column_headers(current_cpu_usage, current_gpu_usage, current_memory_usage);
@@ -292,10 +196,12 @@ gboolean update_ui_func(gpointer user_data) {
     gtk_label_set_text(specs_label, full_specs);
     
     // Update system summary label
-    gtk_label_set_text(summary_label, data->system_summary);
+    if (data->system_summary) {
+        gtk_label_set_text(summary_label, data->system_summary);
+        free(data->system_summary);
+    }
     
-    free(data->gpu_usage);
-    free(data->system_summary);
+    if (data->gpu_usage) free(data->gpu_usage);
     free(data);
 
     updating = FALSE;
@@ -305,6 +211,7 @@ gboolean update_ui_func(gpointer user_data) {
 
 // SECURITY: Enhanced timeout callback with deadlock detection and resource monitoring
 gboolean timeout_callback(gpointer data) {
+    (void)data; // Suppress unused parameter warning
     time_t now = time(NULL);
     
     // SECURITY: Detect hung update threads
@@ -342,6 +249,7 @@ gboolean timeout_callback(gpointer data) {
 // to make them clickable for asc/desc sorting. Initial sort on CPU descending. 
 // Added g_mutex_init for hash_mutex. Initial update now launches thread instead of direct call.
 void activate(GtkApplication *app, gpointer user_data) {
+    (void)user_data; // Suppress unused parameter warning
     GtkWidget *window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window), "TaskMini");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 600);
@@ -384,7 +292,7 @@ void activate(GtkApplication *app, gpointer user_data) {
     const char *filter_labels[] = {"PID (e.g. 100+):", "Name:", "CPU (e.g. 15%+):", 
                                    "GPU (e.g. 10%-):", "Memory (e.g. 100MB+):", 
                                    "Network (e.g. 1KB/S+):", "Type:"};
-    const char *placeholders[] = {"100+", "chrome", "15%+", "5%-", "100MB+", "1KB/S+", "All"};
+    const char *placeholders[] = {"[100,200] or 100+", "chrome", "[5,15]% or 15%+", "[1,5]% or 5%-", "[100MB,1GB] or 100MB+", "[1KB/s,1MB/s] or 1KB/s+", "All"};
 
     for (int i = 0; i < 7; i++) {
         GtkWidget *label = gtk_label_new(filter_labels[i]);
@@ -448,34 +356,50 @@ void activate(GtkApplication *app, gpointer user_data) {
 
     column = gtk_tree_view_column_new_with_attributes("PID", renderer, "text", COL_PID, NULL);
     gtk_tree_view_column_set_sort_column_id(column, COL_PID);
+    gtk_tree_view_column_set_clickable(column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
 
     column = gtk_tree_view_column_new_with_attributes("Name", renderer, "text", COL_NAME, NULL);
     gtk_tree_view_column_set_sort_column_id(column, COL_NAME);
+    gtk_tree_view_column_set_clickable(column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
 
     cpu_column = gtk_tree_view_column_new_with_attributes("CPU", renderer, "text", COL_CPU, NULL);
     gtk_tree_view_column_set_sort_column_id(cpu_column, COL_CPU);
+    gtk_tree_view_column_set_clickable(cpu_column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(cpu_column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), cpu_column);
 
     gpu_column = gtk_tree_view_column_new_with_attributes("GPU", renderer, "text", COL_GPU, NULL);
     gtk_tree_view_column_set_sort_column_id(gpu_column, COL_GPU);
+    gtk_tree_view_column_set_clickable(gpu_column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(gpu_column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), gpu_column);
 
     memory_column = gtk_tree_view_column_new_with_attributes("Memory", renderer, "text", COL_MEM, NULL);
     gtk_tree_view_column_set_sort_column_id(memory_column, COL_MEM);
+    gtk_tree_view_column_set_clickable(memory_column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(memory_column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), memory_column);
 
     column = gtk_tree_view_column_new_with_attributes("Network", renderer, "text", COL_NET, NULL);
     gtk_tree_view_column_set_sort_column_id(column, COL_NET);
+    gtk_tree_view_column_set_clickable(column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
 
     column = gtk_tree_view_column_new_with_attributes("Run Time", renderer, "text", COL_RUNTIME, NULL);
     gtk_tree_view_column_set_sort_column_id(column, COL_RUNTIME);
+    gtk_tree_view_column_set_clickable(column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
 
     column = gtk_tree_view_column_new_with_attributes("Type", renderer, "text", COL_TYPE, NULL);
     gtk_tree_view_column_set_sort_column_id(column, COL_TYPE);
+    gtk_tree_view_column_set_clickable(column, TRUE);
+    gtk_tree_view_column_set_sort_indicator(column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(treeview), column);
 
     // Init hashes
@@ -490,14 +414,15 @@ void activate(GtkApplication *app, gpointer user_data) {
     // Get static specs
     static_specs = get_static_specs();
 
-    // Initial update via thread
+    // Show window first to ensure UI is ready
+    gtk_widget_show_all(window);
+
+    // Initial update via thread (after UI is ready)
     updating = TRUE;
     g_thread_new("update_thread", update_thread_func, NULL);
 
     // Timer - refresh every 0.5 seconds for more responsive updates
     g_timeout_add(UI_UPDATE_INTERVAL_MS, timeout_callback, NULL);
-
-    gtk_widget_show_all(window);
 }
 
 // Cache maintenance function to clean up stale entries
@@ -727,26 +652,143 @@ gboolean parse_network_filter(const char *filter, long long *bps, char *op) {
     return (*bps >= 0);
 }
 
+// Parse range filter like "[100,200]" or "[1.5,5.0]"
+gboolean parse_range_filter(const char *filter, double *min_val, double *max_val) {
+    if (!filter || strlen(filter) < 5) return FALSE;
+    
+    // Check if it's a range format [min,max]
+    if (filter[0] != '[') return FALSE;
+    
+    const char *end = strchr(filter, ']');
+    if (!end) return FALSE;
+    
+    // Find comma separator
+    const char *comma = strchr(filter + 1, ',');
+    if (!comma || comma >= end) return FALSE;
+    
+    // Parse min value
+    char min_str[32];
+    int min_len = comma - (filter + 1);
+    if (min_len >= sizeof(min_str)) return FALSE;
+    strncpy(min_str, filter + 1, min_len);
+    min_str[min_len] = '\0';
+    
+    // Parse max value  
+    char max_str[32];
+    int max_len = end - (comma + 1);
+    if (max_len >= sizeof(max_str)) return FALSE;
+    strncpy(max_str, comma + 1, max_len);
+    max_str[max_len] = '\0';
+    
+    // Convert to numbers
+    char *endptr;
+    *min_val = strtod(min_str, &endptr);
+    if (*endptr != '\0') return FALSE;
+    
+    *max_val = strtod(max_str, &endptr);
+    if (*endptr != '\0') return FALSE;
+    
+    return *min_val <= *max_val; // Validate range
+}
+
+// Parse range filter for memory/network like "[100MB,1GB]" 
+gboolean parse_memory_range_filter(const char *filter, long long *min_bytes, long long *max_bytes) {
+    if (!filter || strlen(filter) < 5) return FALSE;
+    
+    // Check if it's a range format [min,max]
+    if (filter[0] != '[') return FALSE;
+    
+    const char *end = strchr(filter, ']');
+    if (!end) return FALSE;
+    
+    // Find comma separator
+    const char *comma = strchr(filter + 1, ',');
+    if (!comma || comma >= end) return FALSE;
+    
+    // Parse min value
+    char min_str[32];
+    int min_len = comma - (filter + 1);
+    if (min_len >= sizeof(min_str)) return FALSE;
+    strncpy(min_str, filter + 1, min_len);
+    min_str[min_len] = '\0';
+    
+    // Parse max value  
+    char max_str[32];
+    int max_len = end - (comma + 1);
+    if (max_len >= sizeof(max_str)) return FALSE;
+    strncpy(max_str, comma + 1, max_len);
+    max_str[max_len] = '\0';
+    
+    // Convert to bytes using existing parse_bytes function
+    *min_bytes = parse_bytes(min_str);
+    *max_bytes = parse_bytes(max_str);
+    
+    return (*min_bytes >= 0 && *max_bytes >= 0 && *min_bytes <= *max_bytes);
+}
+
+// Parse range filter for network like "[1MB/s,10MB/s]"
+gboolean parse_network_range_filter(const char *filter, long long *min_bps, long long *max_bps) {
+    if (!filter || strlen(filter) < 5) return FALSE;
+    
+    // Check if it's a range format [min,max]
+    if (filter[0] != '[') return FALSE;
+    
+    const char *end = strchr(filter, ']');
+    if (!end) return FALSE;
+    
+    // Find comma separator
+    const char *comma = strchr(filter + 1, ',');
+    if (!comma || comma >= end) return FALSE;
+    
+    // Parse min value
+    char min_str[32];
+    int min_len = comma - (filter + 1);
+    if (min_len >= sizeof(min_str)) return FALSE;
+    strncpy(min_str, filter + 1, min_len);
+    min_str[min_len] = '\0';
+    
+    // Parse max value  
+    char max_str[32];
+    int max_len = end - (comma + 1);
+    if (max_len >= sizeof(max_str)) return FALSE;
+    strncpy(max_str, comma + 1, max_len);
+    max_str[max_len] = '\0';
+    
+    // Convert to bytes per second using existing network_to_bps function
+    *min_bps = network_to_bps(min_str);
+    *max_bps = network_to_bps(max_str);
+    
+    return (*min_bps >= 0 && *max_bps >= 0 && *min_bps <= *max_bps);
+}
+
 // Function to check if a process matches the current filter criteria
 gboolean process_matches_filter(Process *proc) {
     if (!current_filter.active) return TRUE;
     
     // PID filter
     if (strlen(current_filter.pid_filter) > 0) {
-        double filter_pid;
-        char op;
-        if (parse_numeric_filter(current_filter.pid_filter, &filter_pid, &op, NULL)) {
-            int proc_pid = atoi(proc->pid);
-            switch (op) {
-                case '+':
-                    if (proc_pid < filter_pid) return FALSE;
-                    break;
-                case '-':
-                    if (proc_pid > filter_pid) return FALSE;
-                    break;
-                case '=':
-                    if (proc_pid != (int)filter_pid) return FALSE;
-                    break;
+        int proc_pid = atoi(proc->pid);
+        
+        // Check for range filter first [min,max]
+        double min_val, max_val;
+        if (parse_range_filter(current_filter.pid_filter, &min_val, &max_val)) {
+            if (proc_pid < (int)min_val || proc_pid > (int)max_val) return FALSE;
+        } else {
+            // Use existing numeric filter logic
+            double filter_pid;
+            char op;
+            if (parse_numeric_filter(current_filter.pid_filter, &filter_pid, &op, NULL)) {
+                switch (op) {
+                    case '+':
+                        if (proc_pid < filter_pid) return FALSE;
+                        break;
+                    case '-':
+                        if (proc_pid > filter_pid) return FALSE;
+                        break;
+                    case '=':
+                        if (proc_pid != (int)filter_pid) return FALSE;
+                        break;
+                }
             }
         }
     }
@@ -770,62 +812,85 @@ gboolean process_matches_filter(Process *proc) {
     
     // CPU filter
     if (strlen(current_filter.cpu_filter) > 0) {
-        double filter_cpu;
-        char op;
-        if (parse_numeric_filter(current_filter.cpu_filter, &filter_cpu, &op, "%")) {
-            double proc_cpu = strtod(proc->cpu, NULL);
-            switch (op) {
-                case '+':
-                    if (proc_cpu < filter_cpu) return FALSE;
-                    break;
-                case '-':
-                    if (proc_cpu > filter_cpu) return FALSE;
-                    break;
-                case '=':
-                    if (fabs(proc_cpu - filter_cpu) > 0.1) return FALSE;
-                    break;
+        double proc_cpu = strtod(proc->cpu, NULL);
+        
+        // Check for range filter first [min,max]
+        double min_val, max_val;
+        if (parse_range_filter(current_filter.cpu_filter, &min_val, &max_val)) {
+            if (proc_cpu < min_val || proc_cpu > max_val) return FALSE;
+        } else {
+            // Use existing numeric filter logic
+            double filter_cpu;
+            char op;
+            if (parse_numeric_filter(current_filter.cpu_filter, &filter_cpu, &op, "%")) {
+                switch (op) {
+                    case '+':
+                        if (proc_cpu < filter_cpu) return FALSE;
+                        break;
+                    case '-':
+                        if (proc_cpu > filter_cpu) return FALSE;
+                        break;
+                    case '=':
+                        if (fabs(proc_cpu - filter_cpu) > 0.1) return FALSE;
+                        break;
+                }
             }
         }
     }
     
     // GPU filter
     if (strlen(current_filter.gpu_filter) > 0) {
-        double filter_gpu;
-        char op;
-        if (parse_numeric_filter(current_filter.gpu_filter, &filter_gpu, &op, "%")) {
-            double proc_gpu = strtod(proc->gpu, NULL);
-            switch (op) {
-                case '+':
-                    if (proc_gpu < filter_gpu) return FALSE;
-                    break;
-                case '-':
-                    if (proc_gpu > filter_gpu) return FALSE;
-                    break;
-                case '=':
-                    if (fabs(proc_gpu - filter_gpu) > 0.1) return FALSE;
-                    break;
+        double proc_gpu = strtod(proc->gpu, NULL);
+        
+        // Check for range filter first [min,max]
+        double min_val, max_val;
+        if (parse_range_filter(current_filter.gpu_filter, &min_val, &max_val)) {
+            if (proc_gpu < min_val || proc_gpu > max_val) return FALSE;
+        } else {
+            // Use existing numeric filter logic
+            double filter_gpu;
+            char op;
+            if (parse_numeric_filter(current_filter.gpu_filter, &filter_gpu, &op, "%")) {
+                switch (op) {
+                    case '+':
+                        if (proc_gpu < filter_gpu) return FALSE;
+                        break;
+                    case '-':
+                        if (proc_gpu > filter_gpu) return FALSE;
+                        break;
+                    case '=':
+                        if (fabs(proc_gpu - filter_gpu) > 0.1) return FALSE;
+                        break;
+                }
             }
         }
     }
     
     // Memory filter
     if (strlen(current_filter.memory_filter) > 0) {
-        long long filter_mem;
-        char op;
-        if (parse_memory_filter(current_filter.memory_filter, &filter_mem, &op)) {
-            long long proc_mem = memory_to_bytes(proc->mem);
-            if (proc_mem >= 0) {
-                switch (op) {
-                    case '+':
-                        if (proc_mem < filter_mem) return FALSE;
-                        break;
-                    case '-':
-                        if (proc_mem > filter_mem) return FALSE;
-                        break;
-                    case '=':
-                        // Exact match within 10% tolerance
-                        if (filter_mem > 0 && (llabs(proc_mem - filter_mem) > filter_mem * 0.1)) return FALSE;
-                        break;
+        long long proc_mem = memory_to_bytes(proc->mem);
+        if (proc_mem >= 0) {
+            // Check for range filter first [min,max]
+            long long min_bytes, max_bytes;
+            if (parse_memory_range_filter(current_filter.memory_filter, &min_bytes, &max_bytes)) {
+                if (proc_mem < min_bytes || proc_mem > max_bytes) return FALSE;
+            } else {
+                // Use existing memory filter logic
+                long long filter_mem;
+                char op;
+                if (parse_memory_filter(current_filter.memory_filter, &filter_mem, &op)) {
+                    switch (op) {
+                        case '+':
+                            if (proc_mem < filter_mem) return FALSE;
+                            break;
+                        case '-':
+                            if (proc_mem > filter_mem) return FALSE;
+                            break;
+                        case '=':
+                            // Exact match within 10% tolerance
+                            if (filter_mem > 0 && (llabs(proc_mem - filter_mem) > filter_mem * 0.1)) return FALSE;
+                            break;
+                    }
                 }
             }
         }
@@ -833,22 +898,29 @@ gboolean process_matches_filter(Process *proc) {
     
     // Network filter
     if (strlen(current_filter.network_filter) > 0) {
-        long long filter_net;
-        char op;
-        if (parse_network_filter(current_filter.network_filter, &filter_net, &op)) {
-            long long proc_net = network_to_bps(proc->net);
-            if (proc_net >= 0) {
-                switch (op) {
-                    case '+':
-                        if (proc_net < filter_net) return FALSE;
-                        break;
-                    case '-':
-                        if (proc_net > filter_net) return FALSE;
-                        break;
-                    case '=':
-                        // Exact match within 10% tolerance
-                        if (filter_net > 0 && (llabs(proc_net - filter_net) > filter_net * 0.1)) return FALSE;
-                        break;
+        long long proc_net = network_to_bps(proc->net);
+        if (proc_net >= 0) {
+            // Check for range filter first [min,max]
+            long long min_bps, max_bps;
+            if (parse_network_range_filter(current_filter.network_filter, &min_bps, &max_bps)) {
+                if (proc_net < min_bps || proc_net > max_bps) return FALSE;
+            } else {
+                // Use existing network filter logic
+                long long filter_net;
+                char op;
+                if (parse_network_filter(current_filter.network_filter, &filter_net, &op)) {
+                    switch (op) {
+                        case '+':
+                            if (proc_net < filter_net) return FALSE;
+                            break;
+                        case '-':
+                            if (proc_net > filter_net) return FALSE;
+                            break;
+                        case '=':
+                            // Exact match within 10% tolerance
+                            if (filter_net > 0 && (llabs(proc_net - filter_net) > filter_net * 0.1)) return FALSE;
+                            break;
+                    }
                 }
             }
         }
@@ -857,7 +929,14 @@ gboolean process_matches_filter(Process *proc) {
     // Type filter
     if (strlen(current_filter.type_filter) > 0 && 
         strcmp(current_filter.type_filter, "All") != 0) {
-        if (strcasecmp(current_filter.type_filter, proc->type) != 0) return FALSE;
+        // Handle system processes which have "🛡️ System" format
+        if (strcasecmp(current_filter.type_filter, "System") == 0) {
+            if (strstr(proc->type, "System") == NULL) return FALSE;
+        } else if (strcasecmp(current_filter.type_filter, "User") == 0) {
+            if (strcasecmp(proc->type, "User") != 0) return FALSE;
+        } else {
+            if (strcasecmp(current_filter.type_filter, proc->type) != 0) return FALSE;
+        }
     }
     
     return TRUE;
@@ -974,7 +1053,13 @@ gboolean validate_filter_input(const char *text, int filter_type) {
     if (!text || strlen(text) == 0) return TRUE; // Empty is valid
     
     switch (filter_type) {
-        case 0: { // PID - should be numeric with optional +/-
+        case 0: { // PID - should be numeric with optional +/- or range [min,max]
+            // Check for range syntax first
+            double min_val, max_val;
+            if (parse_range_filter(text, &min_val, &max_val)) {
+                return TRUE; // Range parsing succeeded
+            }
+            
             char temp[50];
             strncpy(temp, text, sizeof(temp) - 1);
             temp[sizeof(temp) - 1] = '\0';
@@ -992,8 +1077,14 @@ gboolean validate_filter_input(const char *text, int filter_type) {
         }
         case 1: // Name - any text is valid
             return TRUE;
-        case 2: // CPU - should be numeric with % and optional +/-
+        case 2: // CPU - should be numeric with % and optional +/- or range [min,max]%
         case 3: { // GPU - same as CPU
+            // Check for range syntax first
+            double min_val, max_val;
+            if (parse_range_filter(text, &min_val, &max_val)) {
+                return (min_val >= 0 && max_val <= 100); // Valid percentage range
+            }
+            
             char temp[50];
             strncpy(temp, text, sizeof(temp) - 1);
             temp[sizeof(temp) - 1] = '\0';
@@ -1013,7 +1104,13 @@ gboolean validate_filter_input(const char *text, int filter_type) {
             double val = strtod(temp, &endptr);
             return (endptr != temp && *endptr == '\0' && val >= 0 && val <= 100);
         }
-        case 4: { // Memory - should be numeric with unit and optional +/-
+        case 4: { // Memory - should be numeric with unit and optional +/- or range [min,max]
+            // Check for range syntax first
+            long long min_bytes, max_bytes;
+            if (parse_memory_range_filter(text, &min_bytes, &max_bytes)) {
+                return TRUE; // Memory range parsing succeeded
+            }
+            
             char temp[50];
             strncpy(temp, text, sizeof(temp) - 1);
             temp[sizeof(temp) - 1] = '\0';
@@ -1039,8 +1136,16 @@ gboolean validate_filter_input(const char *text, int filter_type) {
             double val = strtod(temp, &endptr);
             return (endptr != temp && *endptr == '\0' && val >= 0);
         }
-        case 5: { // Network - should be numeric with rate units and +/-
+        case 5: { // Network - should be numeric with rate units and +/- or range [min,max]
             if (strlen(text) == 0) return TRUE;
+            
+            // Check for range syntax first
+            long long min_bps, max_bps;
+            if (parse_network_range_filter(text, &min_bps, &max_bps)) {
+                return TRUE; // Network range parsing succeeded
+            }
+            
+            // Use existing network filter validation
             long long bps;
             char op;
             return parse_network_filter(text, &bps, &op);
@@ -1056,66 +1161,11 @@ gboolean validate_filter_input(const char *text, int filter_type) {
 
 // Function to apply current filters to all visible processes
 void apply_filters_to_display(void) {
-    if (!process_cache || !current_filter.active) return;
-    
-    g_mutex_lock(&cache_mutex);
-    
-    // Get all processes from cache and check filter status
-    GHashTableIter iter;
-    gpointer key, value;
-    g_hash_table_iter_init(&iter, process_cache);
-    
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        ProcessCacheEntry *entry = (ProcessCacheEntry *)value;
-        if (!entry || !entry->process) continue;
-        
-        gboolean should_be_visible = process_matches_filter(entry->process);
-        gboolean is_currently_visible = (entry->row_ref && 
-                                        gtk_tree_row_reference_valid(entry->row_ref));
-        
-        if (should_be_visible && !is_currently_visible) {
-            // Show this process
-            GtkTreeIter tree_iter;
-            gtk_list_store_append(liststore, &tree_iter);
-            gtk_list_store_set(liststore, &tree_iter,
-                               COL_PID, entry->process->pid,
-                               COL_NAME, entry->process->name,
-                               COL_CPU, entry->process->cpu,
-                               COL_GPU, entry->process->gpu,
-                               COL_MEM, entry->process->mem,
-                               COL_NET, entry->process->net,
-                               COL_RUNTIME, entry->process->runtime,
-                               COL_TYPE, entry->process->type,
-                               -1);
-            
-            // Update row reference
-            GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(liststore), &tree_iter);
-            if (entry->row_ref) {
-                gtk_tree_row_reference_free(entry->row_ref);
-            }
-            entry->row_ref = gtk_tree_row_reference_new(GTK_TREE_MODEL(liststore), path);
-            gtk_tree_path_free(path);
-            
-        } else if (!should_be_visible && is_currently_visible) {
-            // Hide this process
-            GtkTreePath *path = gtk_tree_row_reference_get_path(entry->row_ref);
-            if (path) {
-                GtkTreeIter tree_iter;
-                if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &tree_iter, path)) {
-                    gtk_list_store_remove(liststore, &tree_iter);
-                }
-                gtk_tree_path_free(path);
-            }
-            
-            // Clear row reference
-            if (entry->row_ref) {
-                gtk_tree_row_reference_free(entry->row_ref);
-                entry->row_ref = NULL;
-            }
-        }
-    }
-    
-    g_mutex_unlock(&cache_mutex);
+    // Since we're using a simplified update approach that clears and repopulates
+    // the entire list, we don't need to do row-by-row filtering here.
+    // The filtering is now handled directly in update_ui_func().
+    // This function is kept for compatibility with filter change callbacks
+    // but doesn't need to do anything since the next UI update will apply filters.
 }
 
 // Function to update column headers with current usage percentages
@@ -1137,4 +1187,15 @@ void update_column_headers(float cpu_percent, float gpu_percent, float memory_pe
         snprintf(memory_title, sizeof(memory_title), "Memory (%.1f%% system)", memory_percent);
         gtk_tree_view_column_set_title(memory_column, memory_title);
     }
+}
+
+// Restore scroll position callback (called as idle callback for more reliable timing)
+gboolean restore_scroll_position(gpointer user_data) {
+    (void)user_data; // Suppress unused parameter warning
+    
+    if (vertical_adjustment) {
+        gtk_adjustment_set_value(vertical_adjustment, saved_scroll_position);
+    }
+    
+    return G_SOURCE_REMOVE; // Remove this idle callback after execution
 }

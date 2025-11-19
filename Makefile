@@ -23,11 +23,13 @@ UI_SRC = $(SRCDIR)/ui/ui.c \
 SYSTEM_SRC = $(SRCDIR)/system/system_info.c \
              $(SRCDIR)/system/process.c \
              $(SRCDIR)/system/gpu.c \
-             $(SRCDIR)/system/network.c
+             $(SRCDIR)/system/network.c \
+             $(SRCDIR)/system/performance.c
 
 UTILS_SRC = $(SRCDIR)/utils/memory.c \
             $(SRCDIR)/utils/security.c \
-            $(SRCDIR)/utils/parsing.c
+            $(SRCDIR)/utils/parsing.c \
+            $(SRCDIR)/utils/memory_pool.c
 
 # All source files
 SOURCES = $(MAIN_SRC) $(UI_SRC) $(SYSTEM_SRC) $(UTILS_SRC)
