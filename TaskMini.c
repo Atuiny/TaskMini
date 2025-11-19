@@ -762,16 +762,56 @@ char* format_memory_human_readable(const char *mem_str) {
 // Teaching: Parse run time string to seconds for sorting, e.g., "01:23:45" or "1-02:34:56". No changes for threading.
 long long parse_runtime_to_seconds(const char *str) {
     int days = 0, hours = 0, mins = 0, secs = 0;
+    
+#ifdef TESTING
+    // Debug output for testing - only print first few times to avoid spam
+    static int debug_count = 0;
+    if (debug_count < 3) {
+        fprintf(stderr, "DEBUG: Parsing runtime string: '%s'\n", str);
+        debug_count++;
+    }
+#endif
+    
     if (sscanf(str, "%d-%d:%d:%d", &days, &hours, &mins, &secs) == 4) {
-        // Good
+        // Format: days-hours:mins:secs
+#ifdef TESTING
+        if (debug_count <= 3) {
+            fprintf(stderr, "DEBUG: Parsed as days-hours:mins:secs = %d-%d:%d:%d\n", days, hours, mins, secs);
+        }
+#endif
     } else if (sscanf(str, "%d:%d:%d", &hours, &mins, &secs) == 3) {
-        // Good
+        // Format: hours:mins:secs
+        days = 0;
+#ifdef TESTING
+        if (debug_count <= 3) {
+            fprintf(stderr, "DEBUG: Parsed as hours:mins:secs = %d:%d:%d\n", hours, mins, secs);
+        }
+#endif
     } else if (sscanf(str, "%d:%d", &mins, &secs) == 2) {
-        // Good
+        // Format: mins:secs
+        days = 0;
+        hours = 0;
+#ifdef TESTING
+        if (debug_count <= 3) {
+            fprintf(stderr, "DEBUG: Parsed as mins:secs = %d:%d\n", mins, secs);
+        }
+#endif
     } else {
+#ifdef TESTING
+        if (debug_count <= 3) {
+            fprintf(stderr, "DEBUG: Failed to parse runtime string\n");
+        }
+#endif
         return 0;
     }
-    return (long long)days * 86400 + hours * 3600 + mins * 60 + secs;
+    
+    long long result = (long long)days * 86400 + hours * 3600 + mins * 60 + secs;
+#ifdef TESTING
+    if (debug_count <= 3) {
+        fprintf(stderr, "DEBUG: Final result = %lld seconds\n", result);
+    }
+#endif
+    return result;
 }
 
 // Teaching: Custom compare function for sorting columns. Handles different types: int for PID, string for Name, float for CPU/Net/GPU, bytes for Mem, seconds for Runtime. No changes for threading, as sorting happens in main thread.
@@ -905,6 +945,7 @@ gboolean is_system_process(const char *name, const char *pid) {
     // Check against known system process names
     for (int i = 0; system_processes[i] != NULL; i++) {
         if (strstr(name, system_processes[i]) != NULL) {
+
             return TRUE;
         }
     }
@@ -919,18 +960,32 @@ gboolean is_system_process(const char *name, const char *pid) {
     char cmd[100];
     sprintf(cmd, "ps -p %s -o uid= 2>/dev/null", pid);
     char *uid_str = run_command(cmd);
-    if (uid_str && strlen(uid_str) > 0) {
-        int uid = atoi(uid_str);
-        if (uid == 0) {
-            // Root process - likely system, but check if it's a user-launched root process
-            if (strstr(name, "sudo") != NULL || 
-                strstr(name, "Terminal") != NULL ||
-                strstr(name, "iTerm") != NULL) {
+    
+
+    
+    // Only process UID if we got valid output from ps command
+    if (uid_str && strlen(uid_str) > 0 && strstr(uid_str, "N/A") == NULL) {
+        // Strip whitespace and verify we have numeric content
+        char *trimmed = uid_str;
+        while (*trimmed == ' ' || *trimmed == '\t' || *trimmed == '\n') trimmed++;
+        
+        // Check if the result is actually a number
+        if (*trimmed >= '0' && *trimmed <= '9') {
+            int uid = atoi(trimmed);
+            if (uid == 0) {
+                // Root process - likely system, but check if it's a user-launched root process
+                if (strstr(name, "sudo") != NULL || 
+                    strstr(name, "Terminal") != NULL ||
+                    strstr(name, "iTerm") != NULL) {
+                    free(uid_str);
+                    return FALSE; // User-launched root process
+                }
                 free(uid_str);
-                return FALSE; // User-launched root process
+                return TRUE;
+            } else {
+                free(uid_str);
+                return FALSE;
             }
-            free(uid_str);
-            return TRUE;
         }
     }
     if (uid_str) free(uid_str);
@@ -1829,6 +1884,7 @@ static void cleanup_resources() {
 }
 
 // Teaching: Main function with optimization cleanup.
+#ifndef TESTING
 int main(int argc, char **argv) {
     // Register cleanup handler
     atexit(cleanup_resources);
@@ -1843,3 +1899,4 @@ int main(int argc, char **argv) {
     
     return status;
 }
+#endif
