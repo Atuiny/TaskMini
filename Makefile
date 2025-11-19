@@ -1,156 +1,118 @@
-# TaskMini Makefile
-# Lightweight process monitor for macOS
+# TaskMini - Modular Makefile
+# Builds a GTK+ task manager with proper separation of concerns
 
 CC = gcc
-CFLAGS = `pkg-config --cflags gtk+-3.0`
+CFLAGS = `pkg-config --cflags gtk+-3.0` -Wall -Wextra -std=c99 -O2
 LIBS = `pkg-config --libs gtk+-3.0` -lpthread
+
+# Directories
+SRCDIR = src
+OBJDIR = obj
+BINDIR = .
+
+# Target executable
 TARGET = TaskMini
-SOURCE = TaskMini.c
-PREFIX = /usr/local
+
+# Source files organized by module
+MAIN_SRC = $(SRCDIR)/main.c
+
+UI_SRC = $(SRCDIR)/ui/ui.c \
+         $(SRCDIR)/ui/context_menu.c \
+         $(SRCDIR)/ui/sorting.c
+
+SYSTEM_SRC = $(SRCDIR)/system/system_info.c \
+             $(SRCDIR)/system/process.c \
+             $(SRCDIR)/system/gpu.c \
+             $(SRCDIR)/system/network.c
+
+UTILS_SRC = $(SRCDIR)/utils/memory.c \
+            $(SRCDIR)/utils/security.c \
+            $(SRCDIR)/utils/parsing.c
+
+# All source files
+SOURCES = $(MAIN_SRC) $(UI_SRC) $(SYSTEM_SRC) $(UTILS_SRC)
+
+# Object files (replace .c with .o and place in obj directory)
+OBJECTS = $(SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 
 # Default target
 all: $(TARGET)
 
-# Build the main executable
-$(TARGET): $(SOURCE)
-	@echo "Building TaskMini..."
-	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCE) $(LIBS)
-	@echo "Build complete! Run with: ./$(TARGET)"
+# Create directories if they don't exist
+$(OBJDIR):
+	@mkdir -p $(OBJDIR)
+	@mkdir -p $(OBJDIR)/ui
+	@mkdir -p $(OBJDIR)/system
+	@mkdir -p $(OBJDIR)/utils
 
-# Install to system (optional)
-install: $(TARGET)
-	@echo "Installing TaskMini to $(PREFIX)/bin..."
-	cp $(TARGET) $(PREFIX)/bin/
-	chmod +x $(PREFIX)/bin/$(TARGET)
-	@echo "TaskMini installed! Run with: TaskMini"
+# Link the target executable
+$(TARGET): $(OBJECTS)
+	@echo "🔗 Linking TaskMini..."
+	@$(CC) $(OBJECTS) -o $(BINDIR)/$(TARGET) $(LIBS)
+	@echo "✅ Build complete! Run with: ./$(TARGET)"
+
+# Compile source files to object files
+$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
+	@echo "🔨 Compiling $<..."
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 # Clean build artifacts
 clean:
-	@echo "Cleaning build artifacts..."
-	rm -f $(TARGET)
-	@echo "Clean complete!"
+	@echo "🧹 Cleaning build artifacts..."
+	@rm -rf $(OBJDIR)
+	@rm -f $(BINDIR)/$(TARGET)
+	@echo "✅ Clean complete!"
 
-# Uninstall from system
-uninstall:
-	@echo "Removing TaskMini from $(PREFIX)/bin..."
-	rm -f $(PREFIX)/bin/$(TARGET)
-	@echo "TaskMini uninstalled!"
+# Install dependencies (for development)
+deps:
+	@echo "📦 Installing GTK+ development dependencies..."
+	@echo "Please install GTK+ 3 development packages for your system:"
+	@echo "  macOS: brew install gtk+3"
+	@echo "  Ubuntu/Debian: sudo apt install libgtk-3-dev"
+	@echo "  CentOS/RHEL: sudo yum install gtk3-devel"
 
 # Development build with debug symbols
-debug: CFLAGS += -g -DDEBUG -Wall -Wextra
-debug: $(TARGET)
+debug: CFLAGS += -g -DDEBUG -O0
+debug: clean $(TARGET)
 
-# Release build with optimizations
-release: CFLAGS += -O2 -DNDEBUG
-release: $(TARGET)
+# Production build with optimizations
+release: CFLAGS += -DNDEBUG -O3 -march=native
+release: clean $(TARGET)
 
-# Check dependencies
-deps:
-	@echo "Checking dependencies..."
-	@which pkg-config > /dev/null || (echo "ERROR: pkg-config not found. Install with: brew install pkg-config" && exit 1)
-	@pkg-config --exists gtk+-3.0 || (echo "ERROR: GTK+3 not found. Install with: brew install gtk+3" && exit 1)
-	@echo "All dependencies satisfied!"
+# Run the application
+run: $(TARGET)
+	@echo "🚀 Starting TaskMini..."
+	@./$(TARGET)
 
-# Test targets
-test: unit-tests stress-tests integration-tests memory-tests performance-tests
-	@echo "All tests completed successfully! ✅"
+# Show build information
+info:
+	@echo "📋 TaskMini Build Information"
+	@echo "=============================="
+	@echo "Target: $(TARGET)"
+	@echo "Source files: $(words $(SOURCES))"
+	@echo "  - Main: 1 file"
+	@echo "  - UI: $(words $(UI_SRC)) files"
+	@echo "  - System: $(words $(SYSTEM_SRC)) files"
+	@echo "  - Utils: $(words $(UTILS_SRC)) files"
+	@echo "Compiler: $(CC)"
+	@echo "Flags: $(CFLAGS)"
 
-unit-tests: tests/test_runner
-	@echo "Running unit tests..."
-	@./tests/test_runner
-
-stress-tests: tests/stress_tests  
-	@echo "Running stress tests..."
-	@./tests/stress_tests
-
-integration-tests: tests/integration_tests
-	@echo "Running integration tests..."
-	@./tests/integration_tests
-
-memory-tests: tests/memory_safety_tests
-	@echo "Running memory safety tests..."
-	@./tests/memory_safety_tests
-
-performance-tests: tests/performance_regression_tests
-	@echo "Running performance regression tests..."
-	@./tests/performance_regression_tests
-
-# Build test executables
-tests/test_runner: tests/test_runner.c tests/taskmini_tests.h $(SOURCE)
-	@mkdir -p tests/bin
-	$(CC) $(CFLAGS) -DTESTING -o tests/test_runner tests/test_runner.c $(LIBS)
-
-tests/stress_tests: tests/stress_tests.c tests/taskmini_tests.h $(SOURCE)
-	@mkdir -p tests/bin  
-	$(CC) $(CFLAGS) -DTESTING -o tests/stress_tests tests/stress_tests.c $(LIBS)
-
-tests/integration_tests: tests/integration_tests.c tests/taskmini_tests.h $(SOURCE)
-	@mkdir -p tests/bin
-	$(CC) $(CFLAGS) -DTESTING -o tests/integration_tests tests/integration_tests.c $(LIBS)
-
-tests/memory_safety_tests: tests/memory_safety_tests.c tests/taskmini_tests.h $(SOURCE)
-	@mkdir -p tests/bin
-	$(CC) $(CFLAGS) -DTESTING -o tests/memory_safety_tests tests/memory_safety_tests.c $(LIBS)
-
-tests/performance_regression_tests: tests/performance_regression_tests.c tests/taskmini_tests.h $(SOURCE)
-	@mkdir -p tests/bin
-	$(CC) $(CFLAGS) -DTESTING -o tests/performance_regression_tests tests/performance_regression_tests.c $(LIBS)
-
-# Clean test artifacts
-clean-tests:
-	@echo "Cleaning test artifacts..."
-	rm -f tests/test_runner tests/stress_tests tests/integration_tests tests/memory_safety_tests tests/performance_regression_tests
-	rm -rf tests/bin
-	@echo "Test artifacts cleaned!"
-
-# Regression test - runs all tests and checks for memory leaks
-regression-test: test
-	@echo "Running regression tests with memory checking..."
-	@if command -v valgrind >/dev/null 2>&1; then \
-		echo "Running with Valgrind..."; \
-		valgrind --leak-check=full --error-exitcode=1 ./tests/test_runner; \
-		valgrind --leak-check=full --error-exitcode=1 ./tests/stress_tests; \
-		valgrind --leak-check=full --error-exitcode=1 ./tests/memory_safety_tests; \
-	else \
-		echo "Valgrind not available, running tests normally..."; \
-	fi
-
-# Code quality checks
-lint:
-	@echo "Running code quality checks..."
-	@if command -v clang-tidy >/dev/null 2>&1; then \
-		clang-tidy $(SOURCE) -- $(CFLAGS); \
-	else \
-		echo "clang-tidy not available, skipping lint check"; \
-	fi
-
-# Show help
+# Help target
 help:
-	@echo "TaskMini Build System"
-	@echo ""
+	@echo "📚 TaskMini Build System"
+	@echo "========================"
 	@echo "Available targets:"
-	@echo "  all            - Build TaskMini (default)"
-	@echo "  install        - Install to $(PREFIX)/bin"
-	@echo "  clean          - Remove build artifacts"  
-	@echo "  uninstall      - Remove from system"
-	@echo "  debug          - Build with debug symbols"
-	@echo "  release        - Build optimized release"
-	@echo "  deps           - Check dependencies"
-	@echo "  test           - Run all tests"
-	@echo "  unit-tests     - Run unit tests only"
-	@echo "  stress-tests   - Run stress tests only"  
-	@echo "  integration-tests - Run integration tests only"
-	@echo "  memory-tests   - Run memory safety tests only"
-	@echo "  performance-tests - Run performance regression tests only"
-	@echo "  regression-test   - Run full regression suite"
-	@echo "  clean-tests    - Clean test artifacts"
-	@echo "  lint           - Run code quality checks"
-	@echo "  help           - Show this help message"
-	@echo ""
-	@echo "Usage examples:"
-	@echo "  make           # Build TaskMini"
-	@echo "  make test      # Run all tests"
-	@echo "  make install   # Build and install"
-	@echo "  make clean     # Clean up"
+	@echo "  all       - Build TaskMini (default)"
+	@echo "  clean     - Remove build artifacts"
+	@echo "  debug     - Build with debug symbols"
+	@echo "  release   - Build optimized version"
+	@echo "  run       - Build and run TaskMini"
+	@echo "  deps      - Show dependency information"
+	@echo "  info      - Show build information"
+	@echo "  help      - Show this help"
 
-.PHONY: all install clean uninstall debug release deps help test unit-tests stress-tests integration-tests clean-tests regression-test lint
+# Declare phony targets
+.PHONY: all clean deps debug release run info help
+
+# Include dependency files if they exist
+-include $(OBJECTS:.o=.d)
