@@ -91,6 +91,9 @@ void free_cache_entry(ProcessCacheEntry *entry) {
 void cleanup_stale_cache_entries(void);
 gboolean process_matches_filter(Process *proc);
 void on_filter_changed(GtkWidget *widget, gpointer user_data);
+gboolean parse_memory_filter(const char *filter, long long *bytes, char *op);
+gboolean parse_network_filter(const char *filter, long long *bps, char *op);
+long long network_to_bps(const char *net_str);
 gboolean validate_filter_input(const char *text, int filter_type);
 void apply_filters_to_display(void);
 
@@ -362,8 +365,8 @@ void activate(GtkApplication *app, gpointer user_data) {
     // Filter entries with labels
     const char *filter_labels[] = {"PID (e.g. 100+):", "Name:", "CPU (e.g. 15%+):", 
                                    "GPU (e.g. 10%-):", "Memory (e.g. 100MB+):", 
-                                   "Network:", "Type:"};
-    const char *placeholders[] = {"100+", "chrome", "15%+", "5%-", "100MB+", "1KB/s+", "All"};
+                                   "Network (e.g. 1KB/S+):", "Type:"};
+    const char *placeholders[] = {"100+", "chrome", "15%+", "5%-", "100MB+", "1KB/S+", "All"};
 
     for (int i = 0; i < 7; i++) {
         GtkWidget *label = gtk_label_new(filter_labels[i]);
@@ -542,23 +545,37 @@ void cleanup_ui_resources(void) {
 
 // Helper function to convert memory string to bytes for comparison
 long long memory_to_bytes(const char *mem_str) {
-    if (!mem_str || strlen(mem_str) == 0) return 0;
+    if (!mem_str || strlen(mem_str) == 0) return -1;
+    
+    char temp[50];
+    strncpy(temp, mem_str, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    
+    // Convert to uppercase for consistent comparison
+    for (int i = 0; temp[i]; i++) {
+        temp[i] = toupper(temp[i]);
+    }
     
     char *endptr;
-    double value = strtod(mem_str, &endptr);
-    if (value < 0) return 0;
+    double value = strtod(temp, &endptr);
+    if (value < 0) return -1;
     
-    // Check suffix
-    if (strstr(endptr, "TB") || strstr(endptr, "tb")) {
-        return (long long)(value * 1024 * 1024 * 1024 * 1024);
-    } else if (strstr(endptr, "GB") || strstr(endptr, "gb")) {
-        return (long long)(value * 1024 * 1024 * 1024);
-    } else if (strstr(endptr, "MB") || strstr(endptr, "mb")) {
-        return (long long)(value * 1024 * 1024);
-    } else if (strstr(endptr, "KB") || strstr(endptr, "kb")) {
-        return (long long)(value * 1024);
+    // Skip whitespace
+    while (*endptr && isspace(*endptr)) endptr++;
+    
+    // Check suffix (case-insensitive)
+    if (strstr(endptr, "TB")) {
+        return (long long)(value * 1024LL * 1024LL * 1024LL * 1024LL);
+    } else if (strstr(endptr, "GB")) {
+        return (long long)(value * 1024LL * 1024LL * 1024LL);
+    } else if (strstr(endptr, "MB")) {
+        return (long long)(value * 1024LL * 1024LL);
+    } else if (strstr(endptr, "KB")) {
+        return (long long)(value * 1024LL);
+    } else if (strstr(endptr, "B") || strlen(endptr) == 0) {
+        return (long long)value; // Bytes or no suffix
     } else {
-        return (long long)value; // Assume bytes
+        return -1; // Invalid suffix
     }
 }
 
@@ -570,11 +587,45 @@ gboolean parse_numeric_filter(const char *filter, double *value, char *op, const
     strncpy(temp, filter, sizeof(temp) - 1);
     temp[sizeof(temp) - 1] = '\0';
     
-    // Remove suffix if provided
+    int len = strlen(temp);
+    if (len == 0) return FALSE;
+    
+    // Check for operators at the end
+    if (temp[len - 1] == '+') {
+        *op = '+';
+        temp[len - 1] = '\0';
+        len--;
+    } else if (temp[len - 1] == '-') {
+        *op = '-';
+        temp[len - 1] = '\0';
+        len--;
+    } else {
+        *op = '='; // Exact match
+    }
+    
+    // Remove suffix if provided (like % for percentages)
     if (suffix && strlen(suffix) > 0) {
         char *pos = strstr(temp, suffix);
-        if (pos) *pos = '\0';
+        if (pos) {
+            *pos = '\0';
+            len = strlen(temp);
+        }
     }
+    
+    if (len == 0) return FALSE;
+    
+    char *endptr;
+    *value = strtod(temp, &endptr);
+    return (endptr != temp && *value >= 0); // Valid if we parsed something and it's non-negative
+}
+
+// Helper function to parse memory filter with operators
+gboolean parse_memory_filter(const char *filter, long long *bytes, char *op) {
+    if (!filter || strlen(filter) == 0) return FALSE;
+    
+    char temp[50];
+    strncpy(temp, filter, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
     
     int len = strlen(temp);
     if (len == 0) return FALSE;
@@ -590,9 +641,72 @@ gboolean parse_numeric_filter(const char *filter, double *value, char *op, const
         *op = '='; // Exact match
     }
     
+    *bytes = memory_to_bytes(temp);
+    return (*bytes >= 0);
+}
+
+// Helper function to convert network rate string to bytes per second
+long long network_to_bps(const char *net_str) {
+    if (!net_str || strlen(net_str) == 0) return -1;
+    
+    char temp[50];
+    strncpy(temp, net_str, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    
+    // Convert to uppercase for consistent comparison
+    for (int i = 0; temp[i]; i++) {
+        temp[i] = toupper(temp[i]);
+    }
+    
     char *endptr;
-    *value = strtod(temp, &endptr);
-    return (endptr != temp); // Valid if we parsed something
+    double value = strtod(temp, &endptr);
+    if (value < 0) return -1;
+    
+    // Skip whitespace
+    while (*endptr && isspace(*endptr)) endptr++;
+    
+    // Check for /S suffix
+    char *per_sec = strstr(endptr, "/S");
+    if (!per_sec) return -1; // Must have /s or /S
+    
+    // Check prefix before /S
+    if (strstr(endptr, "GB/S")) {
+        return (long long)(value * 1024LL * 1024LL * 1024LL);
+    } else if (strstr(endptr, "MB/S")) {
+        return (long long)(value * 1024LL * 1024LL);
+    } else if (strstr(endptr, "KB/S")) {
+        return (long long)(value * 1024LL);
+    } else if (strstr(endptr, "B/S")) {
+        return (long long)value;
+    } else {
+        return -1; // Invalid format
+    }
+}
+
+// Helper function to parse network filter with operators
+gboolean parse_network_filter(const char *filter, long long *bps, char *op) {
+    if (!filter || strlen(filter) == 0) return FALSE;
+    
+    char temp[50];
+    strncpy(temp, filter, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    
+    int len = strlen(temp);
+    if (len == 0) return FALSE;
+    
+    // Check for operators at the end
+    if (temp[len - 1] == '+') {
+        *op = '+';
+        temp[len - 1] = '\0';
+    } else if (temp[len - 1] == '-') {
+        *op = '-';
+        temp[len - 1] = '\0';
+    } else {
+        *op = '='; // Exact match
+    }
+    
+    *bps = network_to_bps(temp);
+    return (*bps >= 0);
 }
 
 // Function to check if a process matches the current filter criteria
@@ -678,28 +792,46 @@ gboolean process_matches_filter(Process *proc) {
     
     // Memory filter
     if (strlen(current_filter.memory_filter) > 0) {
-        long long filter_mem = memory_to_bytes(current_filter.memory_filter);
-        if (filter_mem >= 0) {
-            char op = '+'; // Default to +
-            char *filter_str = current_filter.memory_filter;
-            int len = strlen(filter_str);
-            if (len > 0) {
-                if (filter_str[len - 1] == '+' || filter_str[len - 1] == '-') {
-                    op = filter_str[len - 1];
+        long long filter_mem;
+        char op;
+        if (parse_memory_filter(current_filter.memory_filter, &filter_mem, &op)) {
+            long long proc_mem = memory_to_bytes(proc->mem);
+            if (proc_mem >= 0) {
+                switch (op) {
+                    case '+':
+                        if (proc_mem < filter_mem) return FALSE;
+                        break;
+                    case '-':
+                        if (proc_mem > filter_mem) return FALSE;
+                        break;
+                    case '=':
+                        // Exact match within 10% tolerance
+                        if (filter_mem > 0 && (llabs(proc_mem - filter_mem) > filter_mem * 0.1)) return FALSE;
+                        break;
                 }
             }
-            
-            long long proc_mem = memory_to_bytes(proc->mem);
-            switch (op) {
-                case '+':
-                    if (proc_mem < filter_mem) return FALSE;
-                    break;
-                case '-':
-                    if (proc_mem > filter_mem) return FALSE;
-                    break;
-                default: // Exact match within 10% tolerance
-                    if (filter_mem > 0 && (llabs(proc_mem - filter_mem) > filter_mem * 0.1)) return FALSE;
-                    break;
+        }
+    }
+    
+    // Network filter
+    if (strlen(current_filter.network_filter) > 0) {
+        long long filter_net;
+        char op;
+        if (parse_network_filter(current_filter.network_filter, &filter_net, &op)) {
+            long long proc_net = network_to_bps(proc->net);
+            if (proc_net >= 0) {
+                switch (op) {
+                    case '+':
+                        if (proc_net < filter_net) return FALSE;
+                        break;
+                    case '-':
+                        if (proc_net > filter_net) return FALSE;
+                        break;
+                    case '=':
+                        // Exact match within 10% tolerance
+                        if (filter_net > 0 && (llabs(proc_net - filter_net) > filter_net * 0.1)) return FALSE;
+                        break;
+                }
             }
         }
     }
@@ -889,8 +1021,12 @@ gboolean validate_filter_input(const char *text, int filter_type) {
             double val = strtod(temp, &endptr);
             return (endptr != temp && *endptr == '\0' && val >= 0);
         }
-        case 5: // Network - any text for now
-            return TRUE;
+        case 5: { // Network - should be numeric with rate units and +/-
+            if (strlen(text) == 0) return TRUE;
+            long long bps;
+            char op;
+            return parse_network_filter(text, &bps, &op);
+        }
         case 6: // Type - should be System, User, or All
             return (strcasecmp(text, "System") == 0 || 
                    strcasecmp(text, "User") == 0 || 
