@@ -91,6 +91,8 @@ void free_cache_entry(ProcessCacheEntry *entry) {
 void cleanup_stale_cache_entries(void);
 gboolean process_matches_filter(Process *proc);
 void on_filter_changed(GtkWidget *widget, gpointer user_data);
+gboolean validate_filter_input(const char *text, int filter_type);
+void apply_filters_to_display(void);
 
 // Incremental UI update function that preserves scroll position by only updating changed rows
 gboolean update_ui_func(gpointer user_data) {
@@ -322,6 +324,14 @@ void activate(GtkApplication *app, gpointer user_data) {
     GtkWidget *window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window), "TaskMini");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 600);
+    
+    // Add CSS for error styling
+    GtkCssProvider *css_provider = gtk_css_provider_new();
+    const char *css = ".error { background-color: #ffcccc; border: 1px solid #ff6666; }";
+    gtk_css_provider_load_from_data(css_provider, css, -1, NULL);
+    gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
+                                               GTK_STYLE_PROVIDER(css_provider),
+                                               GTK_STYLE_PROVIDER_PRIORITY_USER);
 
     // Main vertical box for layout
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
@@ -366,7 +376,7 @@ void activate(GtkApplication *app, gpointer user_data) {
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(filter_entries[i]), "System");
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(filter_entries[i]), "User");
             gtk_combo_box_set_active(GTK_COMBO_BOX(filter_entries[i]), 0); // Default to "All"
-            g_signal_connect(gtk_bin_get_child(GTK_BIN(filter_entries[i])), "changed", 
+            g_signal_connect(filter_entries[i], "changed", 
                            G_CALLBACK(on_filter_changed), GINT_TO_POINTER(i));
         } else {
             filter_entries[i] = gtk_entry_new();
@@ -706,41 +716,80 @@ gboolean process_matches_filter(Process *proc) {
 // Callback for filter entry changes
 void on_filter_changed(GtkWidget *widget, gpointer user_data) {
     int filter_index = GPOINTER_TO_INT(user_data);
-    const char *text = gtk_entry_get_text(GTK_ENTRY(widget));
+    const char *text;
     
-    switch (filter_index) {
-        case 0: // PID
-            strncpy(current_filter.pid_filter, text, sizeof(current_filter.pid_filter) - 1);
-            break;
-        case 1: // Name
-            strncpy(current_filter.name_filter, text, sizeof(current_filter.name_filter) - 1);
-            break;
-        case 2: // CPU
-            strncpy(current_filter.cpu_filter, text, sizeof(current_filter.cpu_filter) - 1);
-            break;
-        case 3: // GPU
-            strncpy(current_filter.gpu_filter, text, sizeof(current_filter.gpu_filter) - 1);
-            break;
-        case 4: // Memory
-            strncpy(current_filter.memory_filter, text, sizeof(current_filter.memory_filter) - 1);
-            break;
-        case 5: // Network
-            strncpy(current_filter.network_filter, text, sizeof(current_filter.network_filter) - 1);
-            break;
-        case 6: // Type
-            strncpy(current_filter.type_filter, text, sizeof(current_filter.type_filter) - 1);
-            break;
+    // Get text from entry or combo box
+    if (filter_index == 6) { // Type combo box
+        GtkWidget *entry = gtk_bin_get_child(GTK_BIN(widget));
+        text = gtk_entry_get_text(GTK_ENTRY(entry));
+    } else {
+        text = gtk_entry_get_text(GTK_ENTRY(widget));
     }
     
-    // Enable filtering if any field has content
-    current_filter.active = (strlen(current_filter.pid_filter) > 0 ||
-                           strlen(current_filter.name_filter) > 0 ||
-                           strlen(current_filter.cpu_filter) > 0 ||
-                           strlen(current_filter.gpu_filter) > 0 ||
-                           strlen(current_filter.memory_filter) > 0 ||
-                           strlen(current_filter.network_filter) > 0 ||
-                           (strlen(current_filter.type_filter) > 0 && 
-                            strcmp(current_filter.type_filter, "All") != 0));
+    // Validate input and set background color
+    gboolean valid = validate_filter_input(text, filter_index);
+    
+    // Set background color based on validation
+    if (filter_index != 6) { // Don't color combo box
+        GtkStyleContext *context = gtk_widget_get_style_context(widget);
+        if (strlen(text) > 0) {
+            if (valid) {
+                gtk_style_context_remove_class(context, "error");
+            } else {
+                gtk_style_context_add_class(context, "error");
+                return; // Don't apply invalid filter
+            }
+        } else {
+            gtk_style_context_remove_class(context, "error");
+        }
+    }
+    
+    // Update filter criteria if valid
+    if (valid) {
+        switch (filter_index) {
+            case 0: // PID
+                strncpy(current_filter.pid_filter, text, sizeof(current_filter.pid_filter) - 1);
+                current_filter.pid_filter[sizeof(current_filter.pid_filter) - 1] = '\0';
+                break;
+            case 1: // Name
+                strncpy(current_filter.name_filter, text, sizeof(current_filter.name_filter) - 1);
+                current_filter.name_filter[sizeof(current_filter.name_filter) - 1] = '\0';
+                break;
+            case 2: // CPU
+                strncpy(current_filter.cpu_filter, text, sizeof(current_filter.cpu_filter) - 1);
+                current_filter.cpu_filter[sizeof(current_filter.cpu_filter) - 1] = '\0';
+                break;
+            case 3: // GPU
+                strncpy(current_filter.gpu_filter, text, sizeof(current_filter.gpu_filter) - 1);
+                current_filter.gpu_filter[sizeof(current_filter.gpu_filter) - 1] = '\0';
+                break;
+            case 4: // Memory
+                strncpy(current_filter.memory_filter, text, sizeof(current_filter.memory_filter) - 1);
+                current_filter.memory_filter[sizeof(current_filter.memory_filter) - 1] = '\0';
+                break;
+            case 5: // Network
+                strncpy(current_filter.network_filter, text, sizeof(current_filter.network_filter) - 1);
+                current_filter.network_filter[sizeof(current_filter.network_filter) - 1] = '\0';
+                break;
+            case 6: // Type
+                strncpy(current_filter.type_filter, text, sizeof(current_filter.type_filter) - 1);
+                current_filter.type_filter[sizeof(current_filter.type_filter) - 1] = '\0';
+                break;
+        }
+        
+        // Enable filtering if any field has content
+        current_filter.active = (strlen(current_filter.pid_filter) > 0 ||
+                               strlen(current_filter.name_filter) > 0 ||
+                               strlen(current_filter.cpu_filter) > 0 ||
+                               strlen(current_filter.gpu_filter) > 0 ||
+                               strlen(current_filter.memory_filter) > 0 ||
+                               strlen(current_filter.network_filter) > 0 ||
+                               (strlen(current_filter.type_filter) > 0 && 
+                                strcmp(current_filter.type_filter, "All") != 0));
+        
+        // Apply filters to current display immediately
+        apply_filters_to_display();
+    }
 }
 
 // Callback for clear filters button
@@ -759,7 +808,158 @@ void on_clear_filters(GtkWidget *widget, gpointer user_data) {
                 gtk_combo_box_set_active(GTK_COMBO_BOX(filter_entries[i]), 0); // "All"
             } else {
                 gtk_entry_set_text(GTK_ENTRY(filter_entries[i]), "");
+                // Remove error styling
+                GtkStyleContext *context = gtk_widget_get_style_context(filter_entries[i]);
+                gtk_style_context_remove_class(context, "error");
             }
         }
     }
+    
+    // Apply cleared filters to display
+    apply_filters_to_display();
+}
+
+// Function to validate filter input and provide visual feedback
+gboolean validate_filter_input(const char *text, int filter_type) {
+    if (!text || strlen(text) == 0) return TRUE; // Empty is valid
+    
+    switch (filter_type) {
+        case 0: { // PID - should be numeric with optional +/-
+            char temp[50];
+            strncpy(temp, text, sizeof(temp) - 1);
+            temp[sizeof(temp) - 1] = '\0';
+            
+            // Remove operator suffix
+            int len = strlen(temp);
+            if (len > 0 && (temp[len - 1] == '+' || temp[len - 1] == '-')) {
+                temp[len - 1] = '\0';
+            }
+            
+            // Check if remaining is numeric
+            char *endptr;
+            long val = strtol(temp, &endptr, 10);
+            return (endptr != temp && *endptr == '\0' && val >= 0);
+        }
+        case 1: // Name - any text is valid
+            return TRUE;
+        case 2: // CPU - should be numeric with % and optional +/-
+        case 3: { // GPU - same as CPU
+            char temp[50];
+            strncpy(temp, text, sizeof(temp) - 1);
+            temp[sizeof(temp) - 1] = '\0';
+            
+            // Remove % suffix
+            char *percent_pos = strstr(temp, "%");
+            if (percent_pos) *percent_pos = '\0';
+            
+            // Remove operator suffix
+            int len = strlen(temp);
+            if (len > 0 && (temp[len - 1] == '+' || temp[len - 1] == '-')) {
+                temp[len - 1] = '\0';
+            }
+            
+            // Check if remaining is numeric
+            char *endptr;
+            double val = strtod(temp, &endptr);
+            return (endptr != temp && *endptr == '\0' && val >= 0 && val <= 100);
+        }
+        case 4: { // Memory - should be numeric with unit and optional +/-
+            char temp[50];
+            strncpy(temp, text, sizeof(temp) - 1);
+            temp[sizeof(temp) - 1] = '\0';
+            
+            // Remove operator suffix
+            int len = strlen(temp);
+            if (len > 0 && (temp[len - 1] == '+' || temp[len - 1] == '-')) {
+                temp[len - 1] = '\0';
+            }
+            
+            // Remove unit suffixes
+            char *units[] = {"TB", "GB", "MB", "KB", "B", "tb", "gb", "mb", "kb", "b"};
+            for (int i = 0; i < 10; i++) {
+                char *pos = strstr(temp, units[i]);
+                if (pos && pos == temp + strlen(temp) - strlen(units[i])) {
+                    *pos = '\0';
+                    break;
+                }
+            }
+            
+            // Check if remaining is numeric
+            char *endptr;
+            double val = strtod(temp, &endptr);
+            return (endptr != temp && *endptr == '\0' && val >= 0);
+        }
+        case 5: // Network - any text for now
+            return TRUE;
+        case 6: // Type - should be System, User, or All
+            return (strcasecmp(text, "System") == 0 || 
+                   strcasecmp(text, "User") == 0 || 
+                   strcasecmp(text, "All") == 0);
+        default:
+            return TRUE;
+    }
+}
+
+// Function to apply current filters to all visible processes
+void apply_filters_to_display(void) {
+    if (!process_cache || !current_filter.active) return;
+    
+    g_mutex_lock(&cache_mutex);
+    
+    // Get all processes from cache and check filter status
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, process_cache);
+    
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        ProcessCacheEntry *entry = (ProcessCacheEntry *)value;
+        if (!entry || !entry->process) continue;
+        
+        gboolean should_be_visible = process_matches_filter(entry->process);
+        gboolean is_currently_visible = (entry->row_ref && 
+                                        gtk_tree_row_reference_valid(entry->row_ref));
+        
+        if (should_be_visible && !is_currently_visible) {
+            // Show this process
+            GtkTreeIter tree_iter;
+            gtk_list_store_append(liststore, &tree_iter);
+            gtk_list_store_set(liststore, &tree_iter,
+                               COL_PID, entry->process->pid,
+                               COL_NAME, entry->process->name,
+                               COL_CPU, entry->process->cpu,
+                               COL_GPU, entry->process->gpu,
+                               COL_MEM, entry->process->mem,
+                               COL_NET, entry->process->net,
+                               COL_RUNTIME, entry->process->runtime,
+                               COL_TYPE, entry->process->type,
+                               -1);
+            
+            // Update row reference
+            GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(liststore), &tree_iter);
+            if (entry->row_ref) {
+                gtk_tree_row_reference_free(entry->row_ref);
+            }
+            entry->row_ref = gtk_tree_row_reference_new(GTK_TREE_MODEL(liststore), path);
+            gtk_tree_path_free(path);
+            
+        } else if (!should_be_visible && is_currently_visible) {
+            // Hide this process
+            GtkTreePath *path = gtk_tree_row_reference_get_path(entry->row_ref);
+            if (path) {
+                GtkTreeIter tree_iter;
+                if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &tree_iter, path)) {
+                    gtk_list_store_remove(liststore, &tree_iter);
+                }
+                gtk_tree_path_free(path);
+            }
+            
+            // Clear row reference
+            if (entry->row_ref) {
+                gtk_tree_row_reference_free(entry->row_ref);
+                entry->row_ref = NULL;
+            }
+        }
+    }
+    
+    g_mutex_unlock(&cache_mutex);
 }
