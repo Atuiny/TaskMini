@@ -16,6 +16,7 @@ GMutex hash_mutex;
 // Global widgets for scroll position preservation
 GtkTreeView *global_treeview = NULL;
 GtkScrolledWindow *global_scrolled_window = NULL;
+GtkAdjustment *vertical_adjustment = NULL;
 
 // Hash tables for network tracking
 GHashTable *prev_net_bytes = NULL;
@@ -25,15 +26,38 @@ GHashTable *prev_times = NULL;
 time_t last_update_time = 0;
 int consecutive_failures = 0;
 
-// Scroll position is now restored immediately in update_ui_func
+// Function to restore scroll position with proper timing
+gboolean restore_scroll_position(gpointer user_data) {
+    gdouble *scroll_position = (gdouble *)user_data;
+    
+    if (vertical_adjustment && *scroll_position > 0.0) {
+        // Clamp the value to valid range
+        gdouble upper = gtk_adjustment_get_upper(vertical_adjustment);
+        gdouble page_size = gtk_adjustment_get_page_size(vertical_adjustment);
+        gdouble max_value = upper - page_size;
+        
+        if (*scroll_position > max_value) {
+            *scroll_position = max_value;
+        }
+        
+        gtk_adjustment_set_value(vertical_adjustment, *scroll_position);
+    }
+    
+    return G_SOURCE_REMOVE; // Remove this source
+}
 
 // Function called in main thread via g_idle_add. Updates the liststore with 
-// optimal scroll-preserving technique using model detachment.
+// robust scroll position preservation using both model detachment and explicit scroll restoration.
 gboolean update_ui_func(gpointer user_data) {
     UpdateData *data = (UpdateData *)user_data;
 
-    // BEST SOLUTION: Temporarily detach model from TreeView
-    // This prevents ANY scroll position changes during updates
+    // Save current scroll position before any updates
+    gdouble scroll_position = 0.0;
+    if (vertical_adjustment) {
+        scroll_position = gtk_adjustment_get_value(vertical_adjustment);
+    }
+
+    // Temporarily detach model from TreeView to prevent scroll jumping
     GtkTreeModel *model = NULL;
     if (global_treeview) {
         model = gtk_tree_view_get_model(global_treeview);
@@ -43,7 +67,7 @@ gboolean update_ui_func(gpointer user_data) {
         }
     }
 
-    // Now update the list store - TreeView won't see these changes
+    // Update the list store while TreeView is detached
     gtk_list_store_clear(liststore);
 
     GtkTreeIter iter;
@@ -61,14 +85,22 @@ gboolean update_ui_func(gpointer user_data) {
                            COL_RUNTIME, proc->runtime,
                            COL_TYPE, proc->type,
                            -1);
-        free_process(proc);  // OPTIMIZATION: Use memory pool
+        free_process(proc);
     }
     g_list_free(data->processes);
 
-    // Reattach the model - TreeView will maintain its scroll position perfectly
+    // Reattach the model
     if (global_treeview && model) {
         gtk_tree_view_set_model(global_treeview, model);
-        g_object_unref(model);  // Release our reference
+        g_object_unref(model);
+    }
+
+    // Explicitly restore scroll position after a short delay to ensure model is fully updated
+    if (vertical_adjustment && scroll_position > 0.0) {
+        // Use g_idle_add_full with low priority to ensure this runs after all other updates
+        gdouble *pos_copy = g_malloc(sizeof(gdouble));
+        *pos_copy = scroll_position;
+        g_idle_add_full(G_PRIORITY_LOW, (GSourceFunc)restore_scroll_position, pos_copy, g_free);
     }
 
     // Don't force re-sort - let user's column sort choice persist
@@ -168,6 +200,10 @@ void activate(GtkApplication *app, gpointer user_data) {
     // Scrolled window
     GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
     global_scrolled_window = GTK_SCROLLED_WINDOW(scrolled_window); // Set global reference for scroll preservation
+    
+    // Get the vertical adjustment for scroll position tracking
+    vertical_adjustment = gtk_scrolled_window_get_vadjustment(global_scrolled_window);
+    
     gtk_box_pack_start(GTK_BOX(box), scrolled_window, TRUE, TRUE, 0);
 
     // List store - added G_TYPE_STRING for the new TYPE column

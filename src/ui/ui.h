@@ -9,7 +9,8 @@
 void activate(GtkApplication *app, gpointer user_data);
 gboolean timeout_callback(gpointer data);
 gboolean update_ui_func(gpointer user_data);
-// Scroll position preserved using model detachment in update_ui_func
+gboolean restore_scroll_position(gpointer user_data);
+// Scroll position preserved using model detachment + explicit adjustment restoration
 
 // Context menu functions
 void show_context_menu(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
@@ -31,6 +32,7 @@ extern GMutex hash_mutex;
 // Global widgets for scroll position preservation
 extern GtkTreeView *global_treeview;
 extern GtkScrolledWindow *global_scrolled_window;
+extern GtkAdjustment *vertical_adjustment;
 
 // Hash tables for network tracking
 extern GHashTable *prev_net_bytes;
