@@ -24,24 +24,25 @@ gboolean is_safe_command(const char *cmd) {
     
     if (!is_safe) return FALSE;
     
-    // Still check for dangerous injection characters, but allow pipes in system_profiler commands
-    const char *dangerous[] = {";", "&", "`", "$(", "${", "\\", NULL};
-    
-    for (int i = 0; dangerous[i]; i++) {
-        if (strstr(cmd, dangerous[i])) return FALSE;
-    }
-    
-    // Special handling for commands that need pipes and quotes
+    // Special handling for commands that need pipes and quotes - check this FIRST
     if (strncmp(cmd, "system_profiler", 15) == 0 || 
         strncmp(cmd, "nettop", 6) == 0 ||
-        strncmp(cmd, "ps", 2) == 0) {
-        return TRUE; // Allow pipes for these specific commands
+        strncmp(cmd, "ps", 2) == 0 ||
+        strncmp(cmd, "df", 2) == 0) {
+        
+        // Still check for the most dangerous injection characters even for special commands
+        const char *dangerous[] = {";", "&", "`", "$(", "${", "\\", NULL};
+        for (int i = 0; dangerous[i]; i++) {
+            if (strstr(cmd, dangerous[i])) return FALSE;
+        }
+        
+        return TRUE; // Allow pipes and quotes for these specific commands
     }
     
-    // Check for remaining dangerous characters in other commands
-    if (strstr(cmd, "|") || strstr(cmd, ">") || strstr(cmd, "<") || 
-        strstr(cmd, "'") || strstr(cmd, "\"")) {
-        return FALSE;
+    // For other commands, check for all dangerous characters including pipes and quotes
+    const char *all_dangerous[] = {";", "&", "`", "$(", "${", "\\", "|", ">", "<", "'", "\"", NULL};
+    for (int i = 0; all_dangerous[i]; i++) {
+        if (strstr(cmd, all_dangerous[i])) return FALSE;
     }
     
     return TRUE;
