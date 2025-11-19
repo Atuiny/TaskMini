@@ -44,6 +44,9 @@ extern int consecutive_failures;
 extern gboolean update_thread_running;
 extern time_t update_start_time;
 
+// Filter functions
+void on_clear_filters(GtkWidget *widget, gpointer user_data);
+
 // Cleanup function
 void cleanup_ui_resources(void);
 

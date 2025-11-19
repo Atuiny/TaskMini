@@ -44,6 +44,18 @@ typedef struct {
     gboolean valid;             // Whether the row reference is valid
 } ProcessCacheEntry;
 
-// Scroll position is now preserved using GTK model detachment technique
+// Filter criteria structure
+typedef struct {
+    char pid_filter[20];        // PID filter (e.g., "100+", "50-", "123")
+    char name_filter[100];      // Name filter (substring search)
+    char cpu_filter[20];        // CPU filter (e.g., "15%+", "5%-")
+    char gpu_filter[20];        // GPU filter (e.g., "10%+", "0%-")
+    char memory_filter[20];     // Memory filter (e.g., "100MB+", "1GB-")
+    char network_filter[20];    // Network filter (e.g., "1KB/s+")
+    char type_filter[20];       // Type filter ("System", "User", "All")
+    gboolean active;            // Whether filtering is enabled
+} FilterCriteria;
+
+// Scroll position is now preserved using incremental updates
 
 #endif // TYPES_H

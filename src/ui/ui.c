@@ -3,6 +3,9 @@
 #include "../utils/utils.h"
 #include "../common/config.h"
 #include <time.h>
+#include <ctype.h>
+#include <math.h>
+#include <strings.h>
 
 // Global UI variables
 GtkApplication *app = NULL;
@@ -25,6 +28,10 @@ GHashTable *prev_times = NULL;
 // Process cache for incremental updates (key: PID, value: ProcessCacheEntry*)
 GHashTable *process_cache = NULL;
 GMutex cache_mutex;
+
+// Filter system
+FilterCriteria current_filter = {0};
+GtkWidget *filter_entries[7] = {0}; // PID, Name, CPU, GPU, Memory, Network, Type
 
 // Security tracking
 time_t last_update_time = 0;
@@ -80,8 +87,10 @@ void free_cache_entry(ProcessCacheEntry *entry) {
     }
 }
 
-// Forward declaration
+// Forward declarations
 void cleanup_stale_cache_entries(void);
+gboolean process_matches_filter(Process *proc);
+void on_filter_changed(GtkWidget *widget, gpointer user_data);
 
 // Incremental UI update function that preserves scroll position by only updating changed rows
 gboolean update_ui_func(gpointer user_data) {
@@ -103,19 +112,68 @@ gboolean update_ui_func(gpointer user_data) {
         
         ProcessCacheEntry *cache_entry = g_hash_table_lookup(process_cache, new_proc->pid);
         
+        // Check if process matches current filter
+        gboolean matches_filter = process_matches_filter(new_proc);
+        
         if (cache_entry && cache_entry->valid && 
             cache_entry->row_ref && gtk_tree_row_reference_valid(cache_entry->row_ref)) {
-            // Process exists - check if data changed
-            if (process_data_changed(cache_entry->process, new_proc)) {
-                // Update the existing row
-                update_tree_row_by_ref(cache_entry->row_ref, new_proc);
+            // Process exists in cache
+            gboolean was_visible = process_matches_filter(cache_entry->process);
+            
+            if (matches_filter && was_visible) {
+                // Still visible - check if data changed
+                if (process_data_changed(cache_entry->process, new_proc)) {
+                    update_tree_row_by_ref(cache_entry->row_ref, new_proc);
+                    
+                    // Update cached process data
+                    free_process(cache_entry->process);
+                    cache_entry->process = malloc(sizeof(Process));
+                    memcpy(cache_entry->process, new_proc, sizeof(Process));
+                }
+            } else if (matches_filter && !was_visible) {
+                // Now matches filter - show it
+                GtkTreeIter iter;
+                gtk_list_store_append(liststore, &iter);
+                gtk_list_store_set(liststore, &iter,
+                                   COL_PID, new_proc->pid,
+                                   COL_NAME, new_proc->name,
+                                   COL_CPU, new_proc->cpu,
+                                   COL_GPU, new_proc->gpu,
+                                   COL_MEM, new_proc->mem,
+                                   COL_NET, new_proc->net,
+                                   COL_RUNTIME, new_proc->runtime,
+                                   COL_TYPE, new_proc->type,
+                                   -1);
+                
+                // Update row reference
+                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(liststore), &iter);
+                if (cache_entry->row_ref) {
+                    gtk_tree_row_reference_free(cache_entry->row_ref);
+                }
+                cache_entry->row_ref = gtk_tree_row_reference_new(GTK_TREE_MODEL(liststore), path);
+                gtk_tree_path_free(path);
                 
                 // Update cached process data
                 free_process(cache_entry->process);
                 cache_entry->process = malloc(sizeof(Process));
                 memcpy(cache_entry->process, new_proc, sizeof(Process));
+            } else if (!matches_filter && was_visible) {
+                // No longer matches filter - hide it
+                GtkTreePath *path = gtk_tree_row_reference_get_path(cache_entry->row_ref);
+                if (path) {
+                    GtkTreeIter iter;
+                    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &iter, path)) {
+                        gtk_list_store_remove(liststore, &iter);
+                    }
+                    gtk_tree_path_free(path);
+                }
+                
+                // Update cached process data but mark as hidden
+                free_process(cache_entry->process);
+                cache_entry->process = malloc(sizeof(Process));
+                memcpy(cache_entry->process, new_proc, sizeof(Process));
             }
-        } else {
+        } else if (matches_filter) {
             // New process - add to TreeView and cache
             GtkTreeIter iter;
             gtk_list_store_append(liststore, &iter);
@@ -263,29 +321,75 @@ gboolean timeout_callback(gpointer data) {
 void activate(GtkApplication *app, gpointer user_data) {
     GtkWidget *window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window), "TaskMini");
-    gtk_window_set_default_size(GTK_WINDOW(window), 800, 500);
+    gtk_window_set_default_size(GTK_WINDOW(window), 1000, 600);
 
-    // Vertical box for layout
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_container_add(GTK_CONTAINER(window), box);
+    // Main vertical box for layout
+    GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_add(GTK_CONTAINER(window), main_box);
 
     // System specs label
     specs_label = GTK_LABEL(gtk_label_new("Loading specs..."));
-    gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(specs_label), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_box), GTK_WIDGET(specs_label), FALSE, FALSE, 0);
     
     // System summary label (Networks, VM, Disks info)
     summary_label = GTK_LABEL(gtk_label_new("Loading system info..."));
     gtk_label_set_justify(summary_label, GTK_JUSTIFY_LEFT);
-    gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(summary_label), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_box), GTK_WIDGET(summary_label), FALSE, FALSE, 0);
 
-    // Scrolled window
+    // Horizontal box for filter panel and main content
+    GtkWidget *content_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_box_pack_start(GTK_BOX(main_box), content_box, TRUE, TRUE, 0);
+
+    // Filter panel (left side)
+    GtkWidget *filter_frame = gtk_frame_new("Filters");
+    gtk_widget_set_size_request(filter_frame, 200, -1);
+    gtk_box_pack_start(GTK_BOX(content_box), filter_frame, FALSE, FALSE, 0);
+
+    GtkWidget *filter_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(filter_box), 10);
+    gtk_container_add(GTK_CONTAINER(filter_frame), filter_box);
+
+    // Filter entries with labels
+    const char *filter_labels[] = {"PID (e.g. 100+):", "Name:", "CPU (e.g. 15%+):", 
+                                   "GPU (e.g. 10%-):", "Memory (e.g. 100MB+):", 
+                                   "Network:", "Type:"};
+    const char *placeholders[] = {"100+", "chrome", "15%+", "5%-", "100MB+", "1KB/s+", "All"};
+
+    for (int i = 0; i < 7; i++) {
+        GtkWidget *label = gtk_label_new(filter_labels[i]);
+        gtk_widget_set_halign(label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(filter_box), label, FALSE, FALSE, 0);
+
+        if (i == 6) { // Type filter - use combo box
+            filter_entries[i] = gtk_combo_box_text_new_with_entry();
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(filter_entries[i]), "All");
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(filter_entries[i]), "System");
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(filter_entries[i]), "User");
+            gtk_combo_box_set_active(GTK_COMBO_BOX(filter_entries[i]), 0); // Default to "All"
+            g_signal_connect(gtk_bin_get_child(GTK_BIN(filter_entries[i])), "changed", 
+                           G_CALLBACK(on_filter_changed), GINT_TO_POINTER(i));
+        } else {
+            filter_entries[i] = gtk_entry_new();
+            gtk_entry_set_placeholder_text(GTK_ENTRY(filter_entries[i]), placeholders[i]);
+            g_signal_connect(filter_entries[i], "changed", G_CALLBACK(on_filter_changed), GINT_TO_POINTER(i));
+        }
+        
+        gtk_box_pack_start(GTK_BOX(filter_box), filter_entries[i], FALSE, FALSE, 0);
+    }
+
+    // Clear filters button
+    GtkWidget *clear_btn = gtk_button_new_with_label("Clear All");
+    gtk_box_pack_start(GTK_BOX(filter_box), clear_btn, FALSE, FALSE, 5);
+    g_signal_connect(clear_btn, "clicked", G_CALLBACK(on_clear_filters), NULL);
+
+    // Main content area (right side)
     GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
-    global_scrolled_window = GTK_SCROLLED_WINDOW(scrolled_window); // Set global reference for scroll preservation
+    global_scrolled_window = GTK_SCROLLED_WINDOW(scrolled_window);
     
     // Get the vertical adjustment for scroll position tracking
     vertical_adjustment = gtk_scrolled_window_get_vadjustment(global_scrolled_window);
     
-    gtk_box_pack_start(GTK_BOX(box), scrolled_window, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(content_box), scrolled_window, TRUE, TRUE, 0);
 
     // List store - added G_TYPE_STRING for the new TYPE column
     liststore = gtk_list_store_new(NUM_COLS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
@@ -423,5 +527,239 @@ void cleanup_ui_resources(void) {
     if (static_specs) {
         free(static_specs);
         static_specs = NULL;
+    }
+}
+
+// Helper function to convert memory string to bytes for comparison
+long long memory_to_bytes(const char *mem_str) {
+    if (!mem_str || strlen(mem_str) == 0) return 0;
+    
+    char *endptr;
+    double value = strtod(mem_str, &endptr);
+    if (value < 0) return 0;
+    
+    // Check suffix
+    if (strstr(endptr, "TB") || strstr(endptr, "tb")) {
+        return (long long)(value * 1024 * 1024 * 1024 * 1024);
+    } else if (strstr(endptr, "GB") || strstr(endptr, "gb")) {
+        return (long long)(value * 1024 * 1024 * 1024);
+    } else if (strstr(endptr, "MB") || strstr(endptr, "mb")) {
+        return (long long)(value * 1024 * 1024);
+    } else if (strstr(endptr, "KB") || strstr(endptr, "kb")) {
+        return (long long)(value * 1024);
+    } else {
+        return (long long)value; // Assume bytes
+    }
+}
+
+// Helper function to extract numeric value and operator from filter string
+gboolean parse_numeric_filter(const char *filter, double *value, char *op, const char *suffix) {
+    if (!filter || strlen(filter) == 0) return FALSE;
+    
+    char temp[50];
+    strncpy(temp, filter, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    
+    // Remove suffix if provided
+    if (suffix && strlen(suffix) > 0) {
+        char *pos = strstr(temp, suffix);
+        if (pos) *pos = '\0';
+    }
+    
+    int len = strlen(temp);
+    if (len == 0) return FALSE;
+    
+    // Check for operators at the end
+    if (temp[len - 1] == '+') {
+        *op = '+';
+        temp[len - 1] = '\0';
+    } else if (temp[len - 1] == '-') {
+        *op = '-';
+        temp[len - 1] = '\0';
+    } else {
+        *op = '='; // Exact match
+    }
+    
+    char *endptr;
+    *value = strtod(temp, &endptr);
+    return (endptr != temp); // Valid if we parsed something
+}
+
+// Function to check if a process matches the current filter criteria
+gboolean process_matches_filter(Process *proc) {
+    if (!current_filter.active) return TRUE;
+    
+    // PID filter
+    if (strlen(current_filter.pid_filter) > 0) {
+        double filter_pid;
+        char op;
+        if (parse_numeric_filter(current_filter.pid_filter, &filter_pid, &op, NULL)) {
+            int proc_pid = atoi(proc->pid);
+            switch (op) {
+                case '+':
+                    if (proc_pid < filter_pid) return FALSE;
+                    break;
+                case '-':
+                    if (proc_pid > filter_pid) return FALSE;
+                    break;
+                case '=':
+                    if (proc_pid != (int)filter_pid) return FALSE;
+                    break;
+            }
+        }
+    }
+    
+    // Name filter (substring search, case-insensitive)
+    if (strlen(current_filter.name_filter) > 0) {
+        char proc_name_lower[100], filter_lower[100];
+        strncpy(proc_name_lower, proc->name, sizeof(proc_name_lower) - 1);
+        strncpy(filter_lower, current_filter.name_filter, sizeof(filter_lower) - 1);
+        
+        // Convert to lowercase for case-insensitive search
+        for (int i = 0; proc_name_lower[i]; i++) {
+            proc_name_lower[i] = tolower(proc_name_lower[i]);
+        }
+        for (int i = 0; filter_lower[i]; i++) {
+            filter_lower[i] = tolower(filter_lower[i]);
+        }
+        
+        if (!strstr(proc_name_lower, filter_lower)) return FALSE;
+    }
+    
+    // CPU filter
+    if (strlen(current_filter.cpu_filter) > 0) {
+        double filter_cpu;
+        char op;
+        if (parse_numeric_filter(current_filter.cpu_filter, &filter_cpu, &op, "%")) {
+            double proc_cpu = strtod(proc->cpu, NULL);
+            switch (op) {
+                case '+':
+                    if (proc_cpu < filter_cpu) return FALSE;
+                    break;
+                case '-':
+                    if (proc_cpu > filter_cpu) return FALSE;
+                    break;
+                case '=':
+                    if (fabs(proc_cpu - filter_cpu) > 0.1) return FALSE;
+                    break;
+            }
+        }
+    }
+    
+    // GPU filter
+    if (strlen(current_filter.gpu_filter) > 0) {
+        double filter_gpu;
+        char op;
+        if (parse_numeric_filter(current_filter.gpu_filter, &filter_gpu, &op, "%")) {
+            double proc_gpu = strtod(proc->gpu, NULL);
+            switch (op) {
+                case '+':
+                    if (proc_gpu < filter_gpu) return FALSE;
+                    break;
+                case '-':
+                    if (proc_gpu > filter_gpu) return FALSE;
+                    break;
+                case '=':
+                    if (fabs(proc_gpu - filter_gpu) > 0.1) return FALSE;
+                    break;
+            }
+        }
+    }
+    
+    // Memory filter
+    if (strlen(current_filter.memory_filter) > 0) {
+        long long filter_mem = memory_to_bytes(current_filter.memory_filter);
+        if (filter_mem >= 0) {
+            char op = '+'; // Default to +
+            char *filter_str = current_filter.memory_filter;
+            int len = strlen(filter_str);
+            if (len > 0) {
+                if (filter_str[len - 1] == '+' || filter_str[len - 1] == '-') {
+                    op = filter_str[len - 1];
+                }
+            }
+            
+            long long proc_mem = memory_to_bytes(proc->mem);
+            switch (op) {
+                case '+':
+                    if (proc_mem < filter_mem) return FALSE;
+                    break;
+                case '-':
+                    if (proc_mem > filter_mem) return FALSE;
+                    break;
+                default: // Exact match within 10% tolerance
+                    if (filter_mem > 0 && (llabs(proc_mem - filter_mem) > filter_mem * 0.1)) return FALSE;
+                    break;
+            }
+        }
+    }
+    
+    // Type filter
+    if (strlen(current_filter.type_filter) > 0 && 
+        strcmp(current_filter.type_filter, "All") != 0) {
+        if (strcasecmp(current_filter.type_filter, proc->type) != 0) return FALSE;
+    }
+    
+    return TRUE;
+}
+
+// Callback for filter entry changes
+void on_filter_changed(GtkWidget *widget, gpointer user_data) {
+    int filter_index = GPOINTER_TO_INT(user_data);
+    const char *text = gtk_entry_get_text(GTK_ENTRY(widget));
+    
+    switch (filter_index) {
+        case 0: // PID
+            strncpy(current_filter.pid_filter, text, sizeof(current_filter.pid_filter) - 1);
+            break;
+        case 1: // Name
+            strncpy(current_filter.name_filter, text, sizeof(current_filter.name_filter) - 1);
+            break;
+        case 2: // CPU
+            strncpy(current_filter.cpu_filter, text, sizeof(current_filter.cpu_filter) - 1);
+            break;
+        case 3: // GPU
+            strncpy(current_filter.gpu_filter, text, sizeof(current_filter.gpu_filter) - 1);
+            break;
+        case 4: // Memory
+            strncpy(current_filter.memory_filter, text, sizeof(current_filter.memory_filter) - 1);
+            break;
+        case 5: // Network
+            strncpy(current_filter.network_filter, text, sizeof(current_filter.network_filter) - 1);
+            break;
+        case 6: // Type
+            strncpy(current_filter.type_filter, text, sizeof(current_filter.type_filter) - 1);
+            break;
+    }
+    
+    // Enable filtering if any field has content
+    current_filter.active = (strlen(current_filter.pid_filter) > 0 ||
+                           strlen(current_filter.name_filter) > 0 ||
+                           strlen(current_filter.cpu_filter) > 0 ||
+                           strlen(current_filter.gpu_filter) > 0 ||
+                           strlen(current_filter.memory_filter) > 0 ||
+                           strlen(current_filter.network_filter) > 0 ||
+                           (strlen(current_filter.type_filter) > 0 && 
+                            strcmp(current_filter.type_filter, "All") != 0));
+}
+
+// Callback for clear filters button
+void on_clear_filters(GtkWidget *widget, gpointer user_data) {
+    (void)widget; // Unused parameter
+    (void)user_data; // Unused parameter
+    
+    // Clear all filter criteria
+    memset(&current_filter, 0, sizeof(FilterCriteria));
+    current_filter.active = FALSE;
+    
+    // Clear all filter entry widgets
+    for (int i = 0; i < 7; i++) {
+        if (filter_entries[i]) {
+            if (i == 6) { // Type combo box
+                gtk_combo_box_set_active(GTK_COMBO_BOX(filter_entries[i]), 0); // "All"
+            } else {
+                gtk_entry_set_text(GTK_ENTRY(filter_entries[i]), "");
+            }
+        }
     }
 }
