@@ -214,10 +214,17 @@ static gboolean is_safe_command(const char *cmd) {
         if (strstr(cmd, dangerous[i])) return FALSE;
     }
     
-    // Special handling for commands that need pipes
+    // Special handling for commands that need pipes and quotes
     if (strncmp(cmd, "system_profiler", 15) == 0 || 
-        strncmp(cmd, "df -h", 5) == 0) {
-        // Allow pipes for awk/sed processing in system commands
+        strncmp(cmd, "df -h", 5) == 0 ||
+        strncmp(cmd, "awk ", 4) == 0 ||
+        strncmp(cmd, "sed ", 4) == 0) {
+        // Allow pipes and quotes for data processing in system commands
+        // Still check for the most dangerous injection patterns
+        if (strstr(cmd, "$(") || strstr(cmd, "`") || strstr(cmd, ";") || 
+            strstr(cmd, "&&") || strstr(cmd, "||")) {
+            return FALSE;
+        }
         return TRUE;
     }
     
@@ -598,7 +605,7 @@ char* get_static_specs() {
     char *os_ver = run_command("sw_vers -productVersion");
     
     // Get motherboard/hardware info
-    char *model = run_command("system_profiler SPHardwareDataType | awk '/Model Name:/ {$1=$2=\"\"; print substr($0,3)}' | head -1");
+    char *model = run_command("system_profiler SPHardwareDataType | awk '/Model Name:/ {print $3, $4, $5}' | head -1");
     char *model_id = run_command("system_profiler SPHardwareDataType | awk '/Model Identifier:/ {print $3}' | head -1");
     char *serial = run_command("system_profiler SPHardwareDataType | awk '/Serial Number/ {print $NF}' | head -1");
     
