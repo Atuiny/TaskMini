@@ -174,17 +174,57 @@ static void return_cached_buffer(char *buffer, size_t size) {
     free(buffer);
 }
 
-// SECURITY: Input validation for commands
+// SECURITY: Input validation for commands - allows safe system commands
 static gboolean is_safe_command(const char *cmd) {
     if (!cmd || strlen(cmd) == 0) return FALSE;
-    if (strlen(cmd) > 512) return FALSE;  // Prevent extremely long commands
+    if (strlen(cmd) > 1024) return FALSE;  // Increased limit for system_profiler commands
     
-    // Check for dangerous characters or command injection attempts
-    const char *dangerous[] = {";", "|", "&", "$", "`", "(", ")", "{", "}", 
-                               ">", "<", "!", "\\", "'", "\"", NULL};
+    // Whitelist of safe command prefixes
+    const char *safe_commands[] = {
+        "sysctl -n",
+        "system_profiler",
+        "sw_vers",
+        "df -h",
+        "ps -",
+        "top -",
+        "nettop",
+        "powermetrics",
+        "sed ",
+        "awk ",
+        "head ",
+        "grep ",
+        NULL
+    };
+    
+    // Check if command starts with a safe prefix
+    gboolean is_safe = FALSE;
+    for (int i = 0; safe_commands[i]; i++) {
+        if (strncmp(cmd, safe_commands[i], strlen(safe_commands[i])) == 0) {
+            is_safe = TRUE;
+            break;
+        }
+    }
+    
+    if (!is_safe) return FALSE;
+    
+    // Still check for dangerous injection characters, but allow pipes in system_profiler commands
+    const char *dangerous[] = {";", "&", "`", "$(", "${", "\\", NULL};
     
     for (int i = 0; dangerous[i]; i++) {
         if (strstr(cmd, dangerous[i])) return FALSE;
+    }
+    
+    // Special handling for commands that need pipes
+    if (strncmp(cmd, "system_profiler", 15) == 0 || 
+        strncmp(cmd, "df -h", 5) == 0) {
+        // Allow pipes for awk/sed processing in system commands
+        return TRUE;
+    }
+    
+    // Check for remaining dangerous characters in other commands
+    if (strstr(cmd, "|") || strstr(cmd, ">") || strstr(cmd, "<") || 
+        strstr(cmd, "'") || strstr(cmd, "\"")) {
+        return FALSE;
     }
     
     return TRUE;
@@ -560,10 +600,10 @@ char* get_static_specs() {
     // Get motherboard/hardware info
     char *model = run_command("system_profiler SPHardwareDataType | awk '/Model Name:/ {$1=$2=\"\"; print substr($0,3)}' | head -1");
     char *model_id = run_command("system_profiler SPHardwareDataType | awk '/Model Identifier:/ {print $3}' | head -1");
-    char *serial = run_command("system_profiler SPHardwareDataType | awk '/Serial Number:/ {print $4}' | head -1");
+    char *serial = run_command("system_profiler SPHardwareDataType | awk '/Serial Number/ {print $NF}' | head -1");
     
     // Get storage info - total capacity of main drive
-    char *storage_info = run_command("df -h / | awk 'NR==2 {print $2}' | sed 's/Gi/GB/'");
+    char *storage_info = run_command("df -h / | awk 'NR==2 {print $2}' | head -1");
     
     // Get more detailed hardware info
     char *memory_type = run_command("system_profiler SPMemoryDataType | awk '/Type:/ {print $2; exit}' | head -1");
