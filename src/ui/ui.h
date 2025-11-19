@@ -9,7 +9,7 @@
 void activate(GtkApplication *app, gpointer user_data);
 gboolean timeout_callback(gpointer data);
 gboolean update_ui_func(gpointer user_data);
-gboolean restore_scroll_position_idle(gpointer data);
+// Scroll position restoration is now done directly in update_ui_func
 
 // Context menu functions
 void show_context_menu(GtkWidget *widget, GdkEventButton *event, gpointer user_data);

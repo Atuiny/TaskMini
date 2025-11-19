@@ -25,20 +25,7 @@ GHashTable *prev_times = NULL;
 time_t last_update_time = 0;
 int consecutive_failures = 0;
 
-// Function to restore scroll position in an idle callback
-gboolean restore_scroll_position_idle(gpointer data) {
-    ScrollRestoreData *scroll_data = (ScrollRestoreData *)data;
-    
-    if (global_scrolled_window) {
-        GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(global_scrolled_window);
-        if (vadj) {
-            gtk_adjustment_set_value(vadj, scroll_data->scroll_position);
-        }
-    }
-    
-    g_free(scroll_data);
-    return G_SOURCE_REMOVE; // Remove the idle callback after execution
-}
+// Scroll position is now restored immediately in update_ui_func
 
 // Function called in main thread via g_idle_add. Updates the liststore by clearing 
 // and appending from the process list. Updates the specs label. Frees the data structures. 
@@ -77,11 +64,9 @@ gboolean update_ui_func(gpointer user_data) {
     }
     g_list_free(data->processes);
 
-    // Restore the scroll position after updating the list using an idle callback
+    // Restore the scroll position immediately to prevent jumping
     if (vadj && scroll_position > 0.0) {
-        ScrollRestoreData *scroll_data = g_malloc(sizeof(ScrollRestoreData));
-        scroll_data->scroll_position = scroll_position;
-        g_idle_add(restore_scroll_position_idle, scroll_data);
+        gtk_adjustment_set_value(vadj, scroll_position);
     }
 
     // Don't force re-sort - let user's column sort choice persist

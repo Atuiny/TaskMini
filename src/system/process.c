@@ -131,8 +131,146 @@ gpointer update_thread_func(gpointer data) {
                 } else {
                     sprintf(simplified_line, "Network: Active");
                 }
+            } else if (strstr(line, "VM:")) {
+                // Parse and simplify virtual memory info for regular users
+                char *vm_info = line + 3; // Skip "VM:"
+                
+                // Look for vsize (total virtual memory allocated by all processes)
+                char *vsize_pos = strstr(vm_info, " vsize");
+                char total_allocated[32] = "";
+                
+                if (vsize_pos) {
+                    // Work backwards to find the size before " vsize"
+                    char *size_start = vsize_pos;
+                    while (size_start > vm_info && *(size_start-1) != ' ') {
+                        size_start--;
+                    }
+                    if (size_start < vsize_pos) {
+                        int len = vsize_pos - size_start;
+                        if (len > 0 && len < 31) {
+                            strncpy(total_allocated, size_start, len);
+                            total_allocated[len] = '\0';
+                        }
+                    }
+                }
+                
+                // Look for framework vsize (memory used by system frameworks)
+                char *framework_pos = strstr(vm_info, " framework vsize");
+                char framework_mem[32] = "";
+                
+                if (framework_pos) {
+                    // Work backwards to find the size before " framework vsize"
+                    char *size_start = framework_pos;
+                    while (size_start > vm_info && *(size_start-1) != ' ') {
+                        size_start--;
+                    }
+                    if (size_start < framework_pos) {
+                        int len = framework_pos - size_start;
+                        if (len > 0 && len < 31) {
+                            strncpy(framework_mem, size_start, len);
+                            framework_mem[len] = '\0';
+                        }
+                    }
+                }
+                
+                // Parse swap numbers more accurately
+                char *swapins_str = strstr(vm_info, " swapins");
+                char *swapouts_str = strstr(vm_info, " swapouts");
+                long long actual_swapins = 0, actual_swapouts = 0;
+                
+                if (swapins_str) {
+                    // Look for the number before " swapins"
+                    char *num_end = swapins_str;
+                    char *num_start = num_end - 1;
+                    while (num_start > vm_info && isdigit(*num_start)) {
+                        num_start--;
+                    }
+                    if (num_start < num_end && isdigit(*(num_start + 1))) {
+                        actual_swapins = strtoll(num_start + 1, NULL, 10);
+                    }
+                }
+                
+                if (swapouts_str) {
+                    // Look for the number before " swapouts"
+                    char *num_end = swapouts_str;
+                    char *num_start = num_end - 1;
+                    while (num_start > vm_info && isdigit(*num_start)) {
+                        num_start--;
+                    }
+                    if (num_start < num_end && isdigit(*(num_start + 1))) {
+                        actual_swapouts = strtoll(num_start + 1, NULL, 10);
+                    }
+                }
+                
+                // Show actual swap numbers with simplified format
+                char swap_status[100] = "";
+                if (actual_swapins > 0 || actual_swapouts > 0) {
+                    sprintf(swap_status, " (Swap-ins: %lld, Swap-outs: %lld)", actual_swapins, actual_swapouts);
+                } else {
+                    sprintf(swap_status, " (Swap-ins: 0, Swap-outs: 0)");
+                }
+                
+                if (strlen(total_allocated) > 0 && strlen(framework_mem) > 0) {
+                    // Make it clear this is address space, not actual RAM usage                   
+                    sprintf(simplified_line, "Virtual Memory: %s address space for apps, %s for system%s", 
+                           total_allocated, framework_mem, swap_status);
+                } else if (strlen(total_allocated) > 0) {
+                    sprintf(simplified_line, "Virtual Memory: %s address space reserved (not actual RAM used)%s", 
+                           total_allocated, swap_status);
+                } else {
+                    sprintf(simplified_line, "Virtual Memory: System managing address space%s", swap_status);
+                }
+            } else if (strstr(line, "Disks:")) {
+                // Parse disk activity - format: "Disks: 32434568/892G read, 14229951/334G written."
+                char *disk_info = line + 6; // Skip "Disks:"
+                
+                // Look for read amount - format: "number/sizeG read"
+                char *read_slash = strstr(disk_info, "/");
+                char *write_pos = strstr(disk_info, "written");
+                
+                char read_amount[32] = "";
+                char write_amount[32] = "";
+                
+                if (read_slash) {
+                    // Extract read amount - get everything between "/" and " read"
+                    char *read_end = strstr(read_slash, " read");
+                    if (read_end) {
+                        int len = read_end - read_slash - 1; // Skip the "/"
+                        if (len > 0 && len < 31) {
+                            strncpy(read_amount, read_slash + 1, len);
+                            read_amount[len] = '\0';
+                        }
+                    }
+                }
+                
+                if (write_pos) {
+                    // Look backwards from "written" to find the slash
+                    char *write_search = write_pos;
+                    while (write_search > disk_info && *write_search != '/') {
+                        write_search--;
+                    }
+                    if (*write_search == '/') {
+                        // Extract write amount - get everything between "/" and " written"
+                        int len = write_pos - write_search - 1;
+                        if (len > 0 && len < 31) {
+                            strncpy(write_amount, write_search + 1, len);
+                            write_amount[len] = '\0';
+                        }
+                    }
+                }
+                
+                // Build the simplified line
+                if (strlen(read_amount) > 0 && strlen(write_amount) > 0) {
+                    sprintf(simplified_line, "Disk Activity: %s read, %s written", read_amount, write_amount);
+                } else if (strlen(read_amount) > 0) {
+                    sprintf(simplified_line, "Disk Activity: %s read", read_amount);
+                } else if (strlen(write_amount) > 0) {
+                    sprintf(simplified_line, "Disk Activity: %s written", write_amount);
+                } else {
+                    sprintf(simplified_line, "Disk Activity: Active");
+                }
             } else {
-                // For VM and Disk lines, just use simplified versions
+                // For other lines, just use them as-is
                 strncpy(simplified_line, line, 255);
                 simplified_line[255] = '\0';
             }
