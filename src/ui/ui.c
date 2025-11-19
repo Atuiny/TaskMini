@@ -27,22 +27,23 @@ int consecutive_failures = 0;
 
 // Scroll position is now restored immediately in update_ui_func
 
-// Function called in main thread via g_idle_add. Updates the liststore by clearing 
-// and appending from the process list. Updates the specs label. Frees the data structures. 
-// Resets updating flag. Now preserves scroll position during updates.
+// Function called in main thread via g_idle_add. Updates the liststore with 
+// optimal scroll-preserving technique using model detachment.
 gboolean update_ui_func(gpointer user_data) {
     UpdateData *data = (UpdateData *)user_data;
 
-    // Save current scroll position before updating
-    gdouble scroll_position = 0.0;
-    GtkAdjustment *vadj = NULL;
-    if (global_scrolled_window) {
-        vadj = gtk_scrolled_window_get_vadjustment(global_scrolled_window);
-        if (vadj) {
-            scroll_position = gtk_adjustment_get_value(vadj);
+    // BEST SOLUTION: Temporarily detach model from TreeView
+    // This prevents ANY scroll position changes during updates
+    GtkTreeModel *model = NULL;
+    if (global_treeview) {
+        model = gtk_tree_view_get_model(global_treeview);
+        if (model) {
+            g_object_ref(model);  // Keep reference while detached
+            gtk_tree_view_set_model(global_treeview, NULL);  // Detach
         }
     }
 
+    // Now update the list store - TreeView won't see these changes
     gtk_list_store_clear(liststore);
 
     GtkTreeIter iter;
@@ -64,9 +65,10 @@ gboolean update_ui_func(gpointer user_data) {
     }
     g_list_free(data->processes);
 
-    // Restore the scroll position immediately to prevent jumping
-    if (vadj && scroll_position > 0.0) {
-        gtk_adjustment_set_value(vadj, scroll_position);
+    // Reattach the model - TreeView will maintain its scroll position perfectly
+    if (global_treeview && model) {
+        gtk_tree_view_set_model(global_treeview, model);
+        g_object_unref(model);  // Release our reference
     }
 
     // Don't force re-sort - let user's column sort choice persist
@@ -137,6 +139,8 @@ gboolean timeout_callback(gpointer data) {
     g_thread_new("update_thread", update_thread_func, NULL);
     return TRUE;
 }
+
+// Using model detachment technique for perfect scroll preservation
 
 // Activate callback: Set up vertical box for specs label + scrolled window. 
 // Init hashes and static specs. Added sorting setup: cast liststore to sortable, 

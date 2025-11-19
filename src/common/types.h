@@ -37,9 +37,6 @@ typedef struct {
     char *system_summary;   // System summary info
 } UpdateData;
 
-// Scroll position restoration data
-typedef struct {
-    gdouble scroll_position;
-} ScrollRestoreData;
+// Scroll position is now preserved using GTK model detachment technique
 
 #endif // TYPES_H
