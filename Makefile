@@ -24,7 +24,8 @@ SYSTEM_SRC = $(SRCDIR)/system/system_info.c \
              $(SRCDIR)/system/process.c \
              $(SRCDIR)/system/gpu.c \
              $(SRCDIR)/system/network.c \
-             $(SRCDIR)/system/performance.c
+             $(SRCDIR)/system/performance.c \
+             $(SRCDIR)/system/threaded_collector.c
 
 UTILS_SRC = $(SRCDIR)/utils/memory.c \
             $(SRCDIR)/utils/security.c \

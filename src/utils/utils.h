@@ -12,6 +12,8 @@ void init_process_pool(void);
 void cleanup_process_pool(void);
 Process* alloc_process(void);
 void free_process(Process *proc);
+Process* copy_process(const Process *proc);
+void free_update_data(UpdateData *data);
 
 char* get_cached_buffer(size_t min_size);
 void return_cached_buffer(char *buffer, size_t size);

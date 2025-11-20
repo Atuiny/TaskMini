@@ -16,11 +16,12 @@ char *static_specs = NULL;
 gboolean updating = FALSE;
 GMutex hash_mutex;
 
-// Global widgets for scroll position preservation
+// Threaded data collection
+ThreadedCollector *g_collector = NULL;
+
+// Global widgets
 GtkTreeView *global_treeview = NULL;
 GtkScrolledWindow *global_scrolled_window = NULL;
-GtkAdjustment *vertical_adjustment = NULL;
-static gdouble saved_scroll_position = 0.0;
 
 // Hash tables for network tracking
 GHashTable *prev_net_bytes = NULL;
@@ -105,40 +106,49 @@ gboolean parse_network_filter(const char *filter, long long *bps, char *op);
 long long network_to_bps(const char *net_str);
 gboolean validate_filter_input(const char *text, int filter_type);
 void apply_filters_to_display(void);
-void update_column_headers(float cpu_percent, float gpu_percent, float memory_percent);
+void update_column_headers_old(float cpu_percent, float gpu_percent, float memory_percent);
 
-// Incremental UI update function that preserves scroll position by only updating changed rows
+// Incremental UI update function that preserves scroll position naturally
 gboolean update_ui_func(gpointer user_data) {
     UpdateData *data = (UpdateData *)user_data;
     
-    // Simple approach - clear and add all processes
     if (!liststore) {
         return G_SOURCE_REMOVE;
     }
     
-    // Preserve scroll position before clearing
-    if (vertical_adjustment) {
-        saved_scroll_position = gtk_adjustment_get_value(vertical_adjustment);
-    }
+    // Use incremental updates instead of clearing the entire model
+    // This naturally preserves scroll position without any restoration needed
     
-    // Preserve current sort state before clearing
     GtkTreeSortable *sortable = GTK_TREE_SORTABLE(liststore);
     gint sort_column_id;
     GtkSortType sort_order;
     gboolean was_sorted = gtk_tree_sortable_get_sort_column_id(sortable, &sort_column_id, &sort_order);
     
-    gtk_list_store_clear(liststore);
+    // Temporarily disable sorting during updates to prevent flickering
+    gtk_tree_sortable_set_sort_column_id(sortable, GTK_TREE_SORTABLE_UNSORTED_SORT_COLUMN_ID, GTK_SORT_ASCENDING);
     
-    // Add processes to the list (applying filters)
+    // Build a hash table of current processes for quick lookup
+    GHashTable *new_processes = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, NULL);
     GList *l;
     for (l = data->processes; l != NULL; l = l->next) {
         Process *new_proc = (Process *)l->data;
-        
-        // Check if process matches current filter criteria
         if (process_matches_filter(new_proc)) {
-            // Add to TreeView
-            GtkTreeIter iter;
-            gtk_list_store_append(liststore, &iter);
+            g_hash_table_insert(new_processes, new_proc->pid, new_proc);
+        }
+    }
+    
+    // Update existing rows and mark rows to remove
+    GtkTreeIter iter;
+    gboolean valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(liststore), &iter);
+    GList *rows_to_remove = NULL;
+    
+    while (valid) {
+        gchar *pid_str;
+        gtk_tree_model_get(GTK_TREE_MODEL(liststore), &iter, COL_PID, &pid_str, -1);
+        
+        Process *new_proc = g_hash_table_lookup(new_processes, pid_str);
+        if (new_proc) {
+            // Update existing row with new data
             gtk_list_store_set(liststore, &iter,
                                COL_PID, new_proc->pid,
                                COL_NAME, new_proc->name,
@@ -149,19 +159,68 @@ gboolean update_ui_func(gpointer user_data) {
                                COL_RUNTIME, new_proc->runtime,
                                COL_TYPE, new_proc->type,
                                -1);
+            // Remove from new_processes so we don't add it again
+            g_hash_table_remove(new_processes, pid_str);
+        } else {
+            // Mark this row for removal (process no longer exists or filtered out)
+            GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(liststore), &iter);
+            GtkTreeRowReference *row_ref = gtk_tree_row_reference_new(GTK_TREE_MODEL(liststore), path);
+            rows_to_remove = g_list_prepend(rows_to_remove, row_ref);
+            gtk_tree_path_free(path);
         }
         
-        free_process(new_proc);
+        g_free(pid_str);
+        valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(liststore), &iter);
     }
-    g_list_free(data->processes);
     
-    // Restore sort state if it was previously sorted
+    // Remove rows that no longer exist
+    for (GList *rem = rows_to_remove; rem != NULL; rem = rem->next) {
+        GtkTreeRowReference *row_ref = (GtkTreeRowReference *)rem->data;
+        if (gtk_tree_row_reference_valid(row_ref)) {
+            GtkTreePath *path = gtk_tree_row_reference_get_path(row_ref);
+            if (gtk_tree_model_get_iter(GTK_TREE_MODEL(liststore), &iter, path)) {
+                gtk_list_store_remove(liststore, &iter);
+            }
+            gtk_tree_path_free(path);
+        }
+        gtk_tree_row_reference_free(row_ref);
+    }
+    g_list_free(rows_to_remove);
+    
+    // Add new processes that weren't in the existing model
+    GHashTableIter hash_iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&hash_iter, new_processes);
+    while (g_hash_table_iter_next(&hash_iter, &key, &value)) {
+        Process *new_proc = (Process *)value;
+        gtk_list_store_append(liststore, &iter);
+        gtk_list_store_set(liststore, &iter,
+                           COL_PID, new_proc->pid,
+                           COL_NAME, new_proc->name,
+                           COL_CPU, new_proc->cpu,
+                           COL_GPU, new_proc->gpu,
+                           COL_MEM, new_proc->mem,
+                           COL_NET, new_proc->net,
+                           COL_RUNTIME, new_proc->runtime,
+                           COL_TYPE, new_proc->type,
+                           -1);
+    }
+    
+    // Restore sort state
     if (was_sorted) {
         gtk_tree_sortable_set_sort_column_id(sortable, sort_column_id, sort_order);
     }
     
-    // Schedule scroll position restoration as an idle callback for more reliable timing
-    g_idle_add(restore_scroll_position, NULL);
+    // Clean up
+    g_hash_table_destroy(new_processes);
+    
+    // Free process data
+    for (l = data->processes; l != NULL; l = l->next) {
+        free_process((Process *)l->data);
+    }
+    g_list_free(data->processes);
+    
+    // No scroll restoration needed - incremental updates preserve position naturally!
     
     // Update current usage values (if available)
     if (data->system_cpu_usage > 0) current_cpu_usage = data->system_cpu_usage;
@@ -174,7 +233,7 @@ gboolean update_ui_func(gpointer user_data) {
     }
     
     // Update column headers with current usage
-    update_column_headers(current_cpu_usage, current_gpu_usage, current_memory_usage);
+    update_column_headers_old(current_cpu_usage, current_gpu_usage, current_memory_usage);
     
     // Update specs label with dynamic GPU usage in friendly format
     char full_specs[1024];
@@ -209,35 +268,37 @@ gboolean update_ui_func(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
-// SECURITY: Enhanced timeout callback with deadlock detection and resource monitoring
+// Collector/Bin architecture: fast UI updates from pre-collected data
 gboolean timeout_callback(gpointer data) {
     (void)data; // Suppress unused parameter warning
-    time_t now = time(NULL);
     
-    // SECURITY: Detect hung update threads
-    if (update_thread_running && (now - update_start_time) > (MAX_UPDATE_TIME_MS / 1000)) {
-        // Thread appears hung, reset state
-        updating = FALSE;
-        update_thread_running = FALSE;
-        consecutive_failures++;
-    }
+    static gboolean collector_initialized = FALSE;
     
-    if (updating) {
-        return TRUE;  // Skip if still updating
-    }
-    
-    // SECURITY: Throttle updates if too many failures
-    if (consecutive_failures >= MAX_FAILURES) {
-        static time_t last_throttle_log = 0;
-        if ((now - last_throttle_log) > 10) {  // Log once every 10 seconds
-            g_warning("TaskMini: Throttling updates due to consecutive failures");
-            last_throttle_log = now;
+    // Initialize collector on first run
+    if (!collector_initialized) {
+        if (!g_collector) {
+            g_collector = threaded_collector_create();
         }
-        return TRUE;  // Skip this update cycle
+        
+        if (g_collector) {
+            // Start continuous background data collection
+            threaded_collector_start_continuous_collection(g_collector);
+            collector_initialized = TRUE;
+        }
+        return TRUE; // Skip first update, let collector run
     }
     
-    updating = TRUE;
-    g_thread_new("update_thread", update_thread_func, NULL);
+    // Fast UI update: just read from the pre-collected data bin
+    if (g_collector && !updating) {
+        UpdateData *latest_data = threaded_collector_get_latest_complete_data(g_collector);
+        if (latest_data) {
+            // Only update if we actually got new data
+            updating = TRUE;
+            update_ui_func(latest_data);
+            // Note: update_ui_func will free the data and set updating = FALSE
+        }
+    }
+    
     return TRUE;
 }
 
@@ -324,9 +385,6 @@ void activate(GtkApplication *app, gpointer user_data) {
     // Main content area (right side)
     GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
     global_scrolled_window = GTK_SCROLLED_WINDOW(scrolled_window);
-    
-    // Get the vertical adjustment for scroll position tracking
-    vertical_adjustment = gtk_scrolled_window_get_vadjustment(global_scrolled_window);
     
     gtk_box_pack_start(GTK_BOX(content_box), scrolled_window, TRUE, TRUE, 0);
 
@@ -417,13 +475,83 @@ void activate(GtkApplication *app, gpointer user_data) {
     // Show window first to ensure UI is ready
     gtk_widget_show_all(window);
 
-    // Initial update via thread (after UI is ready)
-    updating = TRUE;
-    g_thread_new("update_thread", update_thread_func, NULL);
-
-    // Timer - refresh every 0.5 seconds for more responsive updates
+    // Timer for UI updates - collector will be initialized on first callback
     g_timeout_add(UI_UPDATE_INTERVAL_MS, timeout_callback, NULL);
 }
+
+// Removed old progressive update functions - now using collector/bin system
+
+// Update system summary information
+void update_system_summary(UpdateData *data) {
+    if (!data) return;
+    
+    // Update summary label with detailed system info (VM, Disks, Networks)
+    if (summary_label) {
+        if (data->system_summary && strlen(data->system_summary) > 0) {
+            // Use the detailed system summary from top output (Networks, VM, Disks)
+            gtk_label_set_text(summary_label, data->system_summary);
+        } else {
+            // Show loading message while data is being collected
+            gtk_label_set_text(summary_label, "Loading system information...");
+        }
+    }
+    
+    // Update specs label with GPU status
+    if (specs_label && static_specs) {
+        char full_specs[1024];
+        char gpu_status[100];
+        
+        if (data->gpu_usage && strlen(data->gpu_usage) > 0) {
+            float gpu_percent = 0.0;
+            if (sscanf(data->gpu_usage, "%f%%", &gpu_percent) == 1) {
+                if (gpu_percent < 10) {
+                    strcpy(gpu_status, "Graphics: Idle");
+                } else if (gpu_percent < 30) {
+                    strcpy(gpu_status, "Graphics: Light use");
+                } else if (gpu_percent < 60) {
+                    strcpy(gpu_status, "Graphics: Active");
+                } else if (gpu_percent < 90) {
+                    strcpy(gpu_status, "Graphics: Busy");
+                } else {
+                    strcpy(gpu_status, "Graphics: Maximum use");
+                }
+                
+                snprintf(full_specs, sizeof(full_specs), "%s\n%s (%.0f%%)", static_specs, gpu_status, gpu_percent);
+            } else {
+                snprintf(full_specs, sizeof(full_specs), "%s\nGraphics: %s", static_specs, data->gpu_usage);
+            }
+        } else {
+            snprintf(full_specs, sizeof(full_specs), "%s\nGraphics: N/A", static_specs);
+        }
+        
+        gtk_label_set_text(specs_label, full_specs);
+    }
+}
+
+// Update column headers with system usage data
+void update_column_headers(UpdateData *data) {
+    if (!data) return;
+    
+    if (cpu_column) {
+        char cpu_title[100];
+        snprintf(cpu_title, sizeof(cpu_title), "CPU (%.1f%% system)", data->system_cpu_usage);
+        gtk_tree_view_column_set_title(cpu_column, cpu_title);
+    }
+    
+    if (memory_column) {
+        char memory_title[100];
+        snprintf(memory_title, sizeof(memory_title), "Memory (%.1f%% system)", data->system_memory_usage);
+        gtk_tree_view_column_set_title(memory_column, memory_title);
+    }
+    
+    if (gpu_column && data->gpu_usage) {
+        char gpu_title[100];
+        snprintf(gpu_title, sizeof(gpu_title), "GPU (%s)", data->gpu_usage);
+        gtk_tree_view_column_set_title(gpu_column, gpu_title);
+    }
+}
+
+
 
 // Cache maintenance function to clean up stale entries
 void cleanup_stale_cache_entries(void) {
@@ -462,6 +590,12 @@ void cleanup_stale_cache_entries(void) {
 
 // Cleanup function for UI resources
 void cleanup_ui_resources(void) {
+    // Cleanup threaded collector
+    if (g_collector) {
+        threaded_collector_destroy(g_collector);
+        g_collector = NULL;
+    }
+    
     if (process_cache) {
         g_hash_table_destroy(process_cache);
         process_cache = NULL;
@@ -1168,8 +1302,8 @@ void apply_filters_to_display(void) {
     // but doesn't need to do anything since the next UI update will apply filters.
 }
 
-// Function to update column headers with current usage percentages
-void update_column_headers(float cpu_percent, float gpu_percent, float memory_percent) {
+// Function to update column headers with current usage percentages (compatible with new system)
+void update_column_headers_old(float cpu_percent, float gpu_percent, float memory_percent) {
     if (cpu_column) {
         char cpu_title[100];
         snprintf(cpu_title, sizeof(cpu_title), "CPU (%.1f%% system)", cpu_percent);
@@ -1189,13 +1323,4 @@ void update_column_headers(float cpu_percent, float gpu_percent, float memory_pe
     }
 }
 
-// Restore scroll position callback (called as idle callback for more reliable timing)
-gboolean restore_scroll_position(gpointer user_data) {
-    (void)user_data; // Suppress unused parameter warning
-    
-    if (vertical_adjustment) {
-        gtk_adjustment_set_value(vertical_adjustment, saved_scroll_position);
-    }
-    
-    return G_SOURCE_REMOVE; // Remove this idle callback after execution
-}
+

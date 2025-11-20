@@ -13,7 +13,7 @@
 #define STRING_CACHE_SIZE 16
 
 // Update intervals
-#define UI_UPDATE_INTERVAL_MS 250  // 0.25 seconds (faster refresh)
+#define UI_UPDATE_INTERVAL_MS 1000  // 1 second for smooth UI (data collection is async)
 
 // Network and GPU monitoring intervals
 #define GPU_CHECK_INTERVAL 2        // Cache GPU result for 2 seconds

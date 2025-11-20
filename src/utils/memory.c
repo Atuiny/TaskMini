@@ -117,3 +117,45 @@ void cleanup_resources(void) {
         cache_initialized = 0;
     }
 }
+
+Process* copy_process(const Process *proc) {
+    if (!proc) return NULL;
+    
+    Process *copy = alloc_process();
+    if (!copy) return NULL;
+    
+    // Copy all fields
+    safe_strncpy(copy->pid, proc->pid, sizeof(copy->pid));
+    safe_strncpy(copy->name, proc->name, sizeof(copy->name));
+    safe_strncpy(copy->cpu, proc->cpu, sizeof(copy->cpu));
+    safe_strncpy(copy->gpu, proc->gpu, sizeof(copy->gpu));
+    safe_strncpy(copy->mem, proc->mem, sizeof(copy->mem));
+    safe_strncpy(copy->net, proc->net, sizeof(copy->net));
+    safe_strncpy(copy->runtime, proc->runtime, sizeof(copy->runtime));
+    safe_strncpy(copy->type, proc->type, sizeof(copy->type));
+    
+    return copy;
+}
+
+void free_update_data(UpdateData *data) {
+    if (!data) return;
+    
+    // Free process list
+    if (data->processes) {
+        GList *current = data->processes;
+        while (current) {
+            Process *proc = (Process*)current->data;
+            free_process(proc);
+            current = current->next;
+        }
+        g_list_free(data->processes);
+    }
+    
+    // Free GPU usage string
+    if (data->gpu_usage) {
+        g_free(data->gpu_usage);
+    }
+    
+    // Free the UpdateData structure itself
+    g_free(data);
+}

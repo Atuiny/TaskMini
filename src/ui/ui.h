@@ -4,12 +4,21 @@
 #include <gtk/gtk.h>
 #include <glib.h>
 #include "../common/types.h"
+#include "../system/threaded_collector.h"
 
 // UI callback functions
 void activate(GtkApplication *app, gpointer user_data);
 gboolean timeout_callback(gpointer data);
 gboolean update_ui_func(gpointer user_data);
+gboolean update_ui_progressive(gpointer user_data);
 gboolean restore_scroll_position(gpointer user_data);
+
+// Progressive update functions
+void update_process_list_basic(GList *processes);
+void update_process_list_complete(GList *processes);
+void update_system_summary(UpdateData *data);
+void update_column_headers(UpdateData *data);
+void save_scroll_position(void);
 // Scroll position preserved using model detachment + explicit adjustment restoration
 
 // Context menu functions
